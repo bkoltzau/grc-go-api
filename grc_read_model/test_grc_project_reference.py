@@ -98,6 +98,13 @@ class GRCGoldProjectSectorTest(SimpleTestCase):
 
         self.assertIsNone(sector.secondary_sector_tag_id)
 
+    def test_allows_secondary_only_gold_sector_without_primary_mapping(self):
+        sector = GRCGoldProjectSector.from_gold_row(
+            sector_row(goprojectprimarysectorid=None)
+        )
+
+        self.assertIsNone(sector.primary_sector_id)
+
     def test_rejects_invalid_sector_contract(self):
         invalid_rows = (
             sector_row(sectorkey=0),

@@ -1,6 +1,6 @@
 # GRC GO Gold-Layer Contract Additions
 
-Status: architecture input for a future DWH change; no database migration is implemented by this document.
+Status: approved version-one contract input as of 2026-08-21; no database migration is implemented by this document.
 
 ## 1. Confirmed product and source decisions
 
@@ -18,6 +18,10 @@ Status: architecture input for a future DWH change; no database migration is imp
 - Dimension and bridge change tracking still needs to be verified. Until confirmed, the sync design must support full comparison/hash processing for those tables.
 - English is the only required UI language.
 - SharePoint URLs and existing GO document metadata are sufficient for the initial document integration.
+- Gold relationships are resolved through declared key/FK relationships. Names and labels are never identity or join keys.
+- `bridgeprojectsector` is the complete Project-sector association set, including the primary sector.
+- `factproject.organizationkey` identifies the reporting National Society organization and `factactivity.organizationkey` identifies the Activity lead organization.
+- `dimlocation` contains multiple administrative levels. Only explicitly mapped ADM1 rows are projected to GO `District` in version 1; other levels remain valid Gold records.
 
 ## 2. Historical Project UI contract
 
@@ -115,6 +119,13 @@ and the existing GO/Mapbox administrative boundary layer for polygons. GO-only
 District attributes such as `is_enclave`, population, NUTS, EMMA, and FIPS are
 not required and are preserved if already present in the serving cache.
 
+`adminlevel = 2` and deeper rows are valid in `dimlocation`; their presence is
+not an extraction error. The initial Project UI does not display
+`project_admin2`, so these relationships are `NOT NEEDED` for version 1 and are
+not coerced to ADM1. If Admin2 is enabled later, Gold must add an explicit
+stable `goadmin2id` and resolve its `parentlocationkey` to an explicitly mapped
+GO District. `locationkey` must not be substituted for a GO Admin2 identity.
+
 ### 3.2.1 `dimdisastertype` GO identity
 
 | Logical field | Suggested type | Required | Meaning and rule |
@@ -180,6 +191,7 @@ without corrupting the last valid read model.
 | `projectname` | varchar(500) | Yes | Authoritative Project title shown on Project list/detail pages. Must not be derived from sector, organization, operation, or source-system name. |
 | `goprojectprogrammetypeid` | smallint | Yes | Exact upstream GO `ProgrammeTypes` integer value used to populate `programme_type` (currently 0-2). Do not map translated labels. |
 | `goprojectoperationtypeid` | smallint | Yes | Exact upstream GO `OperationTypes` integer value used to populate `operation_type` (currently 0-1). This is separate from disaster type and operation status. |
+| `ingestedat` | timestamptz | Yes | Latest Gold ingestion/publication timestamp used for GO `modified_at` and incremental ordering. The existing naive column must be migrated or exposed through an authoritative timezone-aware projection; the adapter does not assume UTC. |
 
 No new Project date, country, budget, total target/reached, status, sector, location, organization, or operation-link fields are required: these already exist on `factproject` or its bridges/dimensions.
 
@@ -190,6 +202,11 @@ The following optional source fields should be added only if the initial restore
 | `reportingcontactname` | varchar(255), nullable | Historical detail conditionally displays it. |
 | `reportingcontactrole` | varchar(255), nullable | Historical detail conditionally displays it. |
 | `reportingcontactemail` | varchar(255), nullable | Historical detail conditionally displays it. |
+
+The initial version-one reader does not require these optional columns and
+publishes the three contact values as unavailable. Enabling them later is an
+isolated reader mapping change and does not require a frontend or serializer
+change.
 
 Project `modified_at` can be derived from the latest `ingestedat`. `modified_by` should remain absent for DWH-published rows rather than naming a fictitious user.
 
@@ -217,11 +234,12 @@ that does not exist; it does not create a new taxonomy or infer identity by
 matching `name`.
 
 Existing `factproject.sectorkey` is the primary-sector relationship and resolves
-through `goprojectprimarysectorid`. Do not publish `bridgeprojectsector` into
-GO `secondary_sectors` until the bridge is confirmed to mean secondary sectors
-rather than all Project-sector associations. Once confirmed, each bridge row
-resolves through `goprojectsecondarysectortagid`; a null mapping is an error for
-that use.
+through `goprojectprimarysectorid`. The approved `bridgeprojectsector` semantic
+is the complete Project-sector association set and therefore includes the
+primary `sectorkey` exactly once. During projection, that primary bridge row is
+validated and excluded from GO `secondary_sectors`; every remaining bridge row
+resolves through `goprojectsecondarysectortagid`. A missing secondary mapping,
+a missing/repeated primary bridge row, or duplicate association is an error.
 
 ### 3.3.2 `dimoperationstatus` GO identities
 
@@ -259,7 +277,13 @@ Do not add or populate operation `amountrequestedchf` or `amountfundedchf` in ve
 | `activityleadtypecode` | varchar(30) | Yes | GO-controlled lead type, initially matching the GO values such as National Society or deployed ERU where applicable. |
 | `activitydescription` | varchar(2000), nullable | Recommended | Narrative/details displayed for a nested Activity when supplied by the source. |
 
-`factactivity.organizationkey` should be formally defined as the primary/lead organization if that is its intended meaning. If it currently means something broader, add a separate nullable `activityleadorganizationkey` FK or identify the lead through `bridgeactivityorganizationrole` with a mandatory controlled role code.
+`factactivity.organizationkey` is approved as the authoritative primary/lead
+organization. `factproject.organizationkey` is approved as the authoritative
+reporting National Society organization. Both resolve through
+`dimorganization` and its `countrykey`; organization names are not mapping
+keys. `bridgeactivityorganizationrole` and `bridgeprojectorganizationrole`
+remain the sources for additional implementing/supporting relationships, not
+for replacing these primary fact relationships.
 
 No new date, Project/Operation relation, activity type, sector, status, modality, delivery mechanism, or location fields are required.
 
@@ -395,11 +419,9 @@ The serving API should use upstream's existing `DJANGO_READ_ONLY=true` configura
 ## 7. Remaining data-contract decisions
 
 - Confirm the Operation/Appeal type mapping. Project programme type and Project operation type now use exact upstream GO integer IDs in Gold and require no textual mapping.
-- Confirm that `bridgeprojectsector` contains secondary-sector associations rather than a complete set that also repeats the primary sector.
-- Confirm whether `factactivity.organizationkey` already means activity lead.
 - Confirm whether deployed ERUs occur in the GRC source data and how they are represented.
 - Extract and approve the exact historical GO disaggregation vocabulary and aggregation rules.
 - Confirm the DWH platform’s dimension/bridge CDC capability.
-- Confirm the timezone convention for existing `timestamp without time zone` ingestion columns. New GO reference-data timestamps should use `timestamptz`; the adapter must not assume that an existing naive timestamp is UTC.
-- Confirm that `dimlocation.adminlevel = 1` is the authoritative ADM1 convention for GO-sourced rows before enabling District publication. The adapter deliberately rejects every other level.
+- Migrate or expose the consumed ingestion timestamps as `timestamptz`. The adapter deliberately rejects timezone-naive values rather than assuming UTC or local time.
+- Confirm which source rule assigns `adminlevel` values. Version 1 maps only rows with `adminlevel = 1` and `godistrictid` to GO District; it accepts other levels in Gold without projecting them.
 - Confirm that Event country/location bridges are populated as complete snapshots, including multi-country Events and every ADM1 location required by the existing Event map.

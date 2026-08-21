@@ -110,7 +110,7 @@ class GRCProjectControlledValues:
 @dataclass(frozen=True)
 class GRCGoldProjectSector:
     sector_key: int
-    primary_sector_id: int
+    primary_sector_id: int | None
     secondary_sector_tag_id: int | None
     code: str
     name: str
@@ -119,7 +119,7 @@ class GRCGoldProjectSector:
     def from_gold_row(cls, row: Mapping[str, object]) -> "GRCGoldProjectSector":
         return cls(
             sector_key=_required_int(row, "sectorkey"),
-            primary_sector_id=_required_int(row, "goprojectprimarysectorid", allow_zero=True),
+            primary_sector_id=_optional_int(row, "goprojectprimarysectorid", allow_zero=True),
             secondary_sector_tag_id=_optional_int(
                 row,
                 "goprojectsecondarysectortagid",
@@ -134,7 +134,11 @@ def validate_grc_project_sectors(records: Sequence[GRCGoldProjectSector]) -> Non
     records = tuple(records)
     unique_fields = {
         "sectorkey": [record.sector_key for record in records],
-        "goprojectprimarysectorid": [record.primary_sector_id for record in records],
+        "goprojectprimarysectorid": [
+            record.primary_sector_id
+            for record in records
+            if record.primary_sector_id is not None
+        ],
         "goprojectsecondarysectortagid": [
             record.secondary_sector_tag_id
             for record in records
@@ -145,7 +149,11 @@ def validate_grc_project_sectors(records: Sequence[GRCGoldProjectSector]) -> Non
         if len(values) != len(set(values)):
             raise GRCProjectReferenceError(f"duplicate {field} in dimsector snapshot")
 
-    primary_ids = {record.primary_sector_id for record in records}
+    primary_ids = {
+        record.primary_sector_id
+        for record in records
+        if record.primary_sector_id is not None
+    }
     missing_primary_ids = primary_ids - set(Sector.objects.in_bulk(primary_ids))
     if missing_primary_ids:
         values = ", ".join(str(value) for value in sorted(missing_primary_ids))

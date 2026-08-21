@@ -15,7 +15,7 @@ The existing GO ORM tables remain the read-model cache for fields that have the 
 
 This keeps the existing viewsets, filters, serializers, pagination, and frontend response properties unchanged. A GRC adapter is required only where Gold and GO are not semantically equivalent.
 
-Publication into these tables is conditional on their existing required fields. For example, a GO `Project` requires a reporting National Society, primary sector, start date, and end date even though the corresponding Gold foreign keys are nullable. The publisher must quarantine an incomplete row rather than invent a fallback. `Project.save()` also derives status from its dates, so the future Project publisher must validate that the mapped Gold status agrees with GO's date-based status instead of silently overriding one source with the other.
+Publication into these tables is conditional on their existing required fields. For example, a GO `Project` requires a reporting National Society, primary sector, start date, and end date even though the corresponding Gold foreign keys are nullable. The publisher rejects an incomplete batch rather than inventing a fallback. `Project.save()` also derives status from its dates, so the Project publisher validates that the mapped Gold status agrees with GO's date-based status instead of silently preferring either value.
 
 The serving API should reuse upstream's existing `DJANGO_READ_ONLY=true` setting. The future scheduled publisher must run separately with write access and narrowly scoped database credentials; read-only mode should not be disabled on the serving API to accommodate synchronization.
 
@@ -46,9 +46,9 @@ Region values, and unresolved sovereign keys.
 
 The publisher requires a complete snapshot because dimension CDC remains an
 open DWH question. It receives records from its caller; it does not connect to
-Gold or schedule itself. It also rejects timezone-naive source timestamps until
-the DWH timestamp convention is confirmed rather than assuming UTC or local
-time.
+Gold or schedule itself. It rejects timezone-naive source timestamps; the
+approved Gold interface must expose consumed timestamps as `timestamptz`
+rather than asking the adapter to assume UTC or local time.
 
 The function returns per-batch counters; the future orchestration layer owns
 aggregating them into `GRCSyncRun` and advancing `GRCReadModelState` only after
@@ -83,9 +83,35 @@ including zero as a valid upstream ID. The validator requires those IDs to
 already exist in the upstream reference tables; it does not create sectors or
 match them by name.
 
-The `bridgeprojectsector` meaning and the controlled organization role/type
-values remain data-contract blockers for Project publication. No Project row or
-many-to-many relationship is written until those semantics are confirmed.
+The approved `bridgeprojectsector` meaning is the complete Project-sector set.
+The primary `factproject.sectorkey` must occur exactly once in the bridge and is
+excluded from GO's secondary tags; every other bridge row must resolve through
+an explicit GO `SectorTag` ID. `factproject.organizationkey` is the reporting
+National Society organization and resolves to its GO Country through
+`dimorganization.countrykey` and `dimcountry.gocountryid`.
+
+## Project publication
+
+`grc_project_projection.py` publishes the approved Gold Project fields into the
+existing `deployments.Project` table. It preserves the current Project API,
+filters, serializer and frontend contracts. It resolves Country, reporting NS,
+District, Event, DisasterType, primary Sector and secondary SectorTag only by
+explicit GO IDs, rejects missing dependencies and cross-country Districts, and
+sets internal `MEMBERSHIP` visibility.
+
+The publisher maps the overall budget and target/reached totals, deliberately
+clears unavailable expenditure, sex-disaggregated values and stale annual
+splits so the frontend uses those authoritative overall totals, and does not
+manufacture a modifying user. Whole-CHF validation prevents a decimal Gold
+amount from being silently rounded into GO's integer field. Non-ADM1 Project
+locations remain in Gold and are not coerced into Districts; `project_admin2`
+is not needed by the version-one Project UI.
+
+Gold Project tombstones delete the corresponding serving-cache Project and
+mark its `GRCSourceRecord` deleted. Active rows and tombstones are idempotent and
+cannot overlap in one snapshot. `grc_project_sync.py` performs sector-reference
+validation, Project publication, run accounting and watermark advancement in
+one outer transaction, leaving the prior cache and watermark intact on failure.
 
 ## Disaster Event projection
 
@@ -121,4 +147,81 @@ The future `grc_sync` implementation should:
 5. Advance `GRCReadModelState.last_successful_watermark` only after the domain rows and source records commit successfully.
 6. Mark a failed `GRCSyncRun` without changing the last successful watermark or partially publishing a batch.
 
-No DWH connection, scheduler, orchestration command, API switch, or authentication change is implemented in this phase.
+No DWH credentials, scheduler, request-time API switch, or authentication change is implemented in this phase.
+
+## Reference snapshot orchestration
+
+`grc_reference_sync.py` composes the Country, District, and Event publishers in
+their required dependency order. Its input is a typed, immutable
+`GRCGoldReferenceSnapshot`; the DWH reader is kept as a separate adapter.
+
+The orchestration creates a `GRCSyncRun`, locks the applicable
+`GRCReadModelState`, rejects a regressive or timezone-naive watermark, validates
+the existing DisasterType identities, and publishes all three domains inside
+one outer database transaction. The watermark and successful run state advance
+in that same transaction. If any downstream projection fails, all serving-cache
+and source-record changes roll back, the previous successful watermark remains
+unchanged, and the run is retained with failed status and the error type.
+
+A complete Country snapshot must be non-empty so an upstream extraction failure
+cannot be mistaken for a valid publication. District and Event snapshots may be
+empty. Equal watermarks are accepted to support idempotent re-runs; older
+watermarks are rejected.
+
+This orchestration layer does not choose a DWH connection, issue Gold SQL,
+schedule itself, apply deletions, or guess unresolved mappings. The adjacent
+reader and management command described below construct the typed snapshot and
+call this orchestrator from a separately write-authorized process.
+
+## Gold readers and management commands
+
+`grc_dwh_reader.py` is the isolated source repository for the reference
+snapshot. It uses the PostgreSQL driver already required by upstream GO and does
+not add the Gold database to Django's ORM configuration. The reader opens a
+short-lived connection with a read-only, repeatable-read transaction, takes its
+watermark from `CURRENT_TIMESTAMP` inside that transaction, loads the four
+approved reference projections, constructs the typed snapshot, and closes the
+connection before publication begins.
+
+Configure the future sync process with:
+
+```env
+GRC_DWH_DB_HOST=
+GRC_DWH_DB_PORT=5432
+GRC_DWH_DB_NAME=
+GRC_DWH_DB_USER=
+GRC_DWH_DB_PASSWORD=
+GRC_DWH_DB_SCHEMA=public
+GRC_DWH_DB_SSLMODE=require
+GRC_DWH_DB_CONNECT_TIMEOUT=10
+```
+
+The password is excluded from the configuration object's representation. The
+schema accepts only one unquoted PostgreSQL identifier and is quoted before use.
+The connection should also use database credentials that have only `SELECT`
+permission on the required Gold objects.
+
+The readers deliberately query the version-one additions documented in
+`docs/grc_gold_contract_additions.md`. They will fail until those fields and the
+Event country/location bridges exist. It rejects incomplete Event geography,
+including unmapped bridge rows, missing or multiple primary-country flags, and a
+primary bridge that disagrees with `dimdisasterevent.primarycountrykey`.
+
+`grc_project_dwh_reader.py` independently loads Project sectors, active Project
+rows, relationships and fact tombstones in another read-only repeatable-read
+snapshot. It enforces the approved all-sector bridge rule, accepts non-ADM1
+location rows without projecting them, and requires at most one primary
+Operation whose Event and DisasterType resolve to explicit GO IDs.
+
+Run a configured, write-authorized publication process with:
+
+```bash
+DJANGO_READ_ONLY=false python manage.py grc_sync_reference
+DJANGO_READ_ONLY=false python manage.py grc_sync_projects
+```
+
+Both commands refuse to execute when `DJANGO_READ_ONLY=true`, then delegate
+extraction and transactional publication to their domain orchestrators. They do
+not schedule themselves, store DWH credentials, add fallback values, or alter
+request-time API queries. Reference publication must complete before Project
+publication so the required GO cache identities exist.

@@ -1,6 +1,6 @@
 # GRC GO handover
 
-Status date: 2026-08-18
+Status date: 2026-08-21
 
 This is the continuation point for the GRC/DRK adaptation of IFRC GO. The implementation starts from fresh IFRC GO forks and follows the minimal-diff rule: preserve upstream pages and API contracts, prefer configuration and isolated `grc_` adapters, and keep the DWH behind the existing GO serving model.
 
@@ -46,22 +46,28 @@ Implemented metadata tables:
 - `grc_sync_run`: publication attempt, counters, status, watermark range, and failure details.
 - `grc_read_model_state`: last successfully published watermark per source stream.
 
-Implemented and tested projection/validation components:
+Implemented projection/validation components:
 
 - Country snapshot projection into existing `api.Region` and `api.Country` rows.
 - ADM1 location projection into existing `api.District` rows.
 - Disaster Event projection into existing `api.Event` rows and geography relations.
 - Project controlled-value, status, and sector reference validation.
+- Project fact/relationship publication into the existing `deployments.Project` contract, including Gold tombstones.
+- Atomic Country/District/Event snapshot orchestration with run tracking, dependency ordering, failure rollback, and successful watermark advancement.
+- Atomic Project snapshot orchestration with run tracking, failure rollback, and successful watermark advancement.
+- An isolated PostgreSQL Gold reader using a read-only repeatable-read transaction, typed snapshot construction, and strict Event-bridge validation.
+- An isolated Project Gold reader enforcing the approved all-sector bridge and primary-Operation rules.
+- A `grc_sync_reference` management command that connects the Gold reader to the transactional publisher and refuses serving-process read-only mode.
+- A `grc_sync_projects` management command using the same separately write-authorized process boundary.
 - Contract tests protecting existing Country, Project, and Operation API shapes.
 
 The detailed boundary and validation rules are in `grc_read_model/README.md`.
 
 Not implemented yet:
 
-- DWH database connection or credentials.
-- Scheduled two-hour synchronization.
-- Incremental orchestration, complete soft-delete reconciliation, quarantine storage, metrics, or alerting.
-- Project row publication.
+- DWH credentials, deployment wiring, and execution against an updated Gold schema.
+- Scheduled two-hour execution.
+- Complete soft-delete reconciliation, quarantine storage, operational metrics, or alerting.
 - Operation/Appeal publication.
 - Activity, Funding, or Indicator publication.
 - API-source switching beyond publishing into the existing GO ORM cache.
@@ -103,13 +109,21 @@ Do not invent mappings. In particular, Event names are not Operation names, acti
 Open data-contract decisions:
 
 - Confirm Appeal/Operation type mapping.
-- Confirm whether `bridgeprojectsector` represents secondary sectors rather than all associations.
-- Confirm whether `factactivity.organizationkey` means the Activity lead.
 - Confirm how deployed ERUs occur and are identified.
 - Approve the exact GO indicator/disaggregation mapping and non-double-counting grain.
 - Confirm dimension/bridge CDC support; otherwise use full snapshot/hash comparison.
-- Confirm timestamps and timezone conventions.
-- Confirm that GO-sourced ADM1 is represented by `dimlocation.adminlevel = 1`.
+- Apply or expose consumed ingestion timestamps as timezone-aware `timestamptz` values.
+- Confirm the source's `adminlevel` assignment rule; version 1 only maps level 1 to GO District and leaves Admin2/deeper rows in Gold.
+
+Approved on 2026-08-21:
+
+- `docs/grc_gold_contract_additions.md` and its proposed version-one field names.
+- `bridgeprojectsector` is the complete Project-sector set, including the primary sector exactly once.
+- `factproject.organizationkey` is the reporting National Society organization.
+- `factactivity.organizationkey` is the Activity lead organization.
+- Organization, geography, sector and operation relationships are resolved through Gold keys/FKs, never names.
+- `dimlocation` may contain ADM1, ADM2 and deeper levels. Non-ADM1 rows are valid but are not projected to GO District.
+- The consumed sync timestamps must be timezone-aware; the adapter rejects naive timestamps.
 
 ## Current test deployment
 
@@ -194,17 +208,18 @@ Database fixtures were loaded for this new test database. Do not rerun `loaddata
 - Docker images built successfully on the VM.
 - Django migrations and base fixtures completed on the VM.
 - API and Web smoke checks returned HTTP 200.
+- Targeted reference and Project projection/orchestration/Gold-reader/management-command tests have been added but still require execution in a complete Django environment.
 - Full API and frontend automated test suites have not yet been run in a complete local development environment.
 - No DWH rows are synchronized yet; Project and Operation screens therefore do not demonstrate real GRC data.
 
 ## Recommended next implementation sequence
 
-1. Review and approve `docs/grc_gold_contract_additions.md` with the DWH team.
-2. Add/ingest the required GO identities and authoritative names in Gold.
-3. Decide dimension/bridge CDC and timestamp semantics.
-4. Implement a narrow DWH reader plus one transactional sync command for Country, District, and Event; validate idempotency and watermark behavior.
-5. Implement Project publication only after organization-role and sector-bridge semantics are approved.
-6. Implement Operation and Activity publication, keeping financial fields unavailable until the financial DWH phase.
+1. Apply `docs/grc_gold_contract_additions.md` with the DWH team.
+2. Add/ingest the approved GO identities and authoritative names in Gold.
+3. Decide dimension/bridge CDC and migrate/expose consumed timestamps as `timestamptz`.
+4. Apply the approved Gold additions, provision read-only DWH credentials, and validate `grc_sync_reference` against a non-production Gold database.
+5. Validate `grc_sync_projects` against the same non-production Gold database after reference publication.
+6. Approve the Operation/Appeal type mapping and Activity controlled-output mappings, then implement those publishers while keeping financial fields unavailable until the financial DWH phase.
 7. Add scheduled execution, metrics, quarantine reporting, and safe publication failure handling.
 8. Replace the smoke-test deployment with a production WSGI/ASGI setup, reverse proxy, TLS, backups, and the trusted Entra authentication proxy.
 9. Implement version-2 Country Profile and SharePoint enhancements separately.
