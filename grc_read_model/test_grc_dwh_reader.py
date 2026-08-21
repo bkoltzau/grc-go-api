@@ -101,6 +101,10 @@ def reference_rows(watermark=None):
                 "bridgeprimarygocountryid": 276,
                 "unmappedcountrycount": 0,
                 "unmappeddistrictcount": 0,
+                "missinglocationcount": 0,
+                "otheradminlevelcount": 2,
+                "unknownadminlevelcount": 0,
+                "duplicatelocationcount": 0,
             }
         ],
     }
@@ -224,6 +228,50 @@ class GRCDWHReaderTest(SimpleTestCase):
         )
         self.assertEqual(captured_kwargs["dbname"], "gold")
         self.assertTrue(connection.closed)
+
+    def test_event_query_projects_only_adm1_and_tolerates_deeper_locations(self):
+        rows = reference_rows()
+        connection = FakeConnection(rows)
+
+        load_grc_reference_snapshot(
+            GRCDWHSettings.from_env(dwh_environment()),
+            connection_factory=lambda **kwargs: connection,
+        )
+
+        event_query = connection.queries[4]
+        self.assertIn("location.adminlevel = 1", event_query)
+        self.assertIn("location.adminlevel <> 1", event_query)
+
+    def test_rejects_event_location_bridge_without_dimension_row(self):
+        rows = reference_rows()
+        rows['FROM "public"."dimdisasterevent"'][0]["missinglocationcount"] = 1
+        connection = FakeConnection(rows)
+
+        with self.assertRaisesRegex(GRCDWHReadError, "without a dimlocation row"):
+            load_grc_reference_snapshot(
+                GRCDWHSettings.from_env(dwh_environment()),
+                connection_factory=lambda **kwargs: connection,
+            )
+
+        self.assertTrue(connection.closed)
+
+    def test_rejects_ambiguous_event_location_bridges(self):
+        invalid_counts = {
+            "unknownadminlevelcount": "without an adminlevel",
+            "duplicatelocationcount": "duplicate location bridge",
+        }
+        for field, message in invalid_counts.items():
+            rows = reference_rows()
+            rows['FROM "public"."dimdisasterevent"'][0][field] = 1
+            connection = FakeConnection(rows)
+
+            with self.subTest(field=field), self.assertRaisesRegex(GRCDWHReadError, message):
+                load_grc_reference_snapshot(
+                    GRCDWHSettings.from_env(dwh_environment()),
+                    connection_factory=lambda **kwargs: connection,
+                )
+
+            self.assertTrue(connection.closed)
 
     def test_rejects_incomplete_event_geography_and_closes_connection(self):
         rows = reference_rows()

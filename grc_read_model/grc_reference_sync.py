@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -22,6 +23,9 @@ from grc_read_model.grc_event_projection import (
 from grc_read_model.models import GRCReadModelState, GRCSyncRun
 
 
+logger = logging.getLogger(__name__)
+
+
 class GRCReferenceSyncError(ValueError):
     pass
 
@@ -35,6 +39,11 @@ class GRCGoldReferenceSnapshot:
     watermark: datetime
 
     def __post_init__(self):
+        if not isinstance(self.watermark, datetime):
+            raise GRCReferenceSyncError("watermark must be a datetime")
+        if self.watermark.tzinfo is None or self.watermark.utcoffset() is None:
+            raise GRCReferenceSyncError("watermark must be timezone-aware")
+
         record_types = {
             "countries": GRCGoldCountry,
             "districts": GRCGoldDistrict,
@@ -49,10 +58,37 @@ class GRCGoldReferenceSnapshot:
 
         if not self.countries:
             raise GRCReferenceSyncError("countries must contain a complete non-empty dimcountry snapshot")
-        if not isinstance(self.watermark, datetime):
-            raise GRCReferenceSyncError("watermark must be a datetime")
-        if self.watermark.tzinfo is None or self.watermark.utcoffset() is None:
-            raise GRCReferenceSyncError("watermark must be timezone-aware")
+
+        ingestion_id_fields = {
+            "countries": "go_country_id",
+            "districts": "go_district_id",
+            "events": "go_event_id",
+        }
+        for field, id_field in ingestion_id_fields.items():
+            invalid_timestamp_ids = [
+                getattr(record, id_field)
+                for record in getattr(self, field)
+                if record.ingested_at is not None
+                and (
+                    not isinstance(record.ingested_at, datetime)
+                    or record.ingested_at.tzinfo is None
+                    or record.ingested_at.utcoffset() is None
+                )
+            ]
+            if invalid_timestamp_ids:
+                values = ", ".join(str(value) for value in invalid_timestamp_ids)
+                raise GRCReferenceSyncError(f"{field} contain invalid ingestion timestamps: {values}")
+
+            future_source_ids = [
+                getattr(record, id_field)
+                for record in getattr(self, field)
+                if record.ingested_at is not None and record.ingested_at > self.watermark
+            ]
+            if future_source_ids:
+                values = ", ".join(str(value) for value in future_source_ids)
+                raise GRCReferenceSyncError(
+                    f"{field} contain ingestion timestamps later than the Gold transaction watermark: {values}"
+                )
 
 
 def _validated_name(value: str, field: str) -> str:
@@ -82,6 +118,18 @@ def publish_grc_reference_snapshot(
     sync_run = GRCSyncRun.objects.create(
         pipeline=pipeline,
         source_watermark_to=snapshot.watermark,
+    )
+    logger.info(
+        "Starting GRC reference publication",
+        extra={
+            "context": {
+                "pipeline": pipeline,
+                "source_system": source_system,
+                "stream": stream,
+                "sync_run_id": str(sync_run.pk),
+                "watermark_to": snapshot.watermark.isoformat(),
+            }
+        },
     )
     previous_watermark = None
 
@@ -172,7 +220,39 @@ def publish_grc_reference_snapshot(
             error_message=str(exc),
             details={"error_type": type(exc).__name__},
         )
+        logger.exception(
+            "GRC reference publication failed",
+            extra={
+                "context": {
+                    "pipeline": pipeline,
+                    "source_system": source_system,
+                    "stream": stream,
+                    "sync_run_id": str(sync_run.pk),
+                    "watermark_to": snapshot.watermark.isoformat(),
+                }
+            },
+        )
         raise
 
     sync_run.refresh_from_db()
+    logger.info(
+        "GRC reference publication succeeded",
+        extra={
+            "context": {
+                "pipeline": pipeline,
+                "rows_deleted": sync_run.rows_deleted,
+                "rows_published": sync_run.rows_published,
+                "rows_seen": sync_run.rows_seen,
+                "source_system": source_system,
+                "stream": stream,
+                "sync_run_id": str(sync_run.pk),
+                "watermark_from": (
+                    sync_run.source_watermark_from.isoformat()
+                    if sync_run.source_watermark_from is not None
+                    else None
+                ),
+                "watermark_to": snapshot.watermark.isoformat(),
+            }
+        },
+    )
     return sync_run

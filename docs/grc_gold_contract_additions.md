@@ -2,6 +2,11 @@
 
 Status: approved version-one contract input as of 2026-08-21; no database migration is implemented by this document.
 
+The companion `docs/grc_gold_contract_additions.sql` is an additive PostgreSQL
+review template for the DWH team. GO never executes it. After the DWH-managed
+migration and backfill, run the read-only `manage.py grc_check_dwh_contract`
+preflight before either synchronization command.
+
 ## 1. Confirmed product and source decisions
 
 - Reuse the retired upstream GO 3W Project list and detail experience as the Project UI baseline.
@@ -171,7 +176,7 @@ than storing repeated location columns on the Event dimension:
 | New table | Column | Rule |
 |---|---|---|
 | `bridgedisastereventlocation` | `disastereventkey` | FK to `dimdisasterevent`; part of the unique key. |
-| `bridgedisastereventlocation` | `locationkey` | FK to `dimlocation`; part of the unique key. Version 1 projection accepts only confirmed ADM1 rows with `godistrictid`. |
+| `bridgedisastereventlocation` | `locationkey` | FK to `dimlocation`; part of the unique key. ADM2/deeper relationships may remain in the complete bridge, but version 1 projects only confirmed ADM1 rows with `godistrictid`. |
 
 GO Event regions are DERIVED from the projected countries' GO Regions.
 `countries_for_preview` initially uses the same authoritative country set.

@@ -58,6 +58,8 @@ def project_snapshot_rows():
                 "unmappeddistrictcount": 0,
                 "missinglocationcount": 0,
                 "otheradminlevelcount": 2,
+                "unknownadminlevelcount": 0,
+                "duplicatelocationcount": 0,
                 "primaryoperationcount": 1,
                 "unmappedeventcount": 0,
                 "unmappeddisastertypecount": 0,
@@ -174,6 +176,29 @@ class GRCProjectDWHReaderTest(SimpleTestCase):
 
         self.assertTrue(connection.closed)
 
+    def test_rejects_ambiguous_project_location_bridges(self):
+        invalid_counts = {
+            "unknownadminlevelcount": "without an adminlevel",
+            "duplicatelocationcount": "duplicate location bridge",
+        }
+        for field, message in invalid_counts.items():
+            rows = project_snapshot_rows()
+            rows["SELECT project.projectid, project.projectname"][0][field] = 1
+            connection = FakeConnection(rows)
+
+            with self.subTest(field=field), self.assertRaisesRegex(GRCDWHReadError, message):
+                load_grc_project_snapshot(
+                    GRCDWHSettings(
+                        host="gold.internal",
+                        name="gold",
+                        user="reader",
+                        password="not-logged",
+                    ),
+                    connection_factory=lambda **kwargs: connection,
+                )
+
+            self.assertTrue(connection.closed)
+
     def test_rejects_multiple_primary_operations(self):
         rows = project_snapshot_rows()
         rows["SELECT project.projectid, project.projectname"][0]["primaryoperationcount"] = 2
@@ -189,3 +214,5 @@ class GRCProjectDWHReaderTest(SimpleTestCase):
                 ),
                 connection_factory=lambda **kwargs: connection,
             )
+
+        self.assertTrue(connection.closed)

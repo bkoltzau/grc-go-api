@@ -6,9 +6,9 @@ This is the continuation point for the GRC/DRK adaptation of IFRC GO. The implem
 
 ## Repository baseline
 
-| Repository | Local checkout | Branch | Handover head before this document | Remote branch |
+| Repository | Local checkout | Branch | Starting baseline | Remote branch |
 |---|---|---|---|---|
-| API | `C:\Users\koltzaub\Code\GRC-GO\grc-go-api` | `grc/read-model` | `213532bf` (`Add GRC read-model foundation`) | `bkoltzau/grc-go-api:grc/read-model` |
+| API | `C:\Users\koltzaub\Code\GRC-GO\grc-go-api` | `grc/read-model` | `204689fb` (`Add GRC Gold reference and project sync`) | `bkoltzau/grc-go-api:grc/read-model` |
 | Web | `C:\Users\koltzaub\Code\grc-go-web-app` | `grc/project-ui` | `81954fe9` (`Restore GRC project views and module configuration`) | `bkoltzau/grc-go-web-app:grc/project-ui` |
 
 Both repositories have read-only `upstream` remotes pointing at the corresponding IFRC GO repositories. The personal branches are intentional; no pull request has been opened yet.
@@ -59,6 +59,10 @@ Implemented projection/validation components:
 - An isolated Project Gold reader enforcing the approved all-sector bridge and primary-Operation rules.
 - A `grc_sync_reference` management command that connects the Gold reader to the transactional publisher and refuses serving-process read-only mode.
 - A `grc_sync_projects` management command using the same separately write-authorized process boundary.
+- A read-only `grc_check_dwh_contract` preflight for the implemented reference and Project reader schemas.
+- A read-only `grc_sync_status` command for durable watermarks, run outcomes, and row counters, including JSON output.
+- Start/success/failure logging for reference and Project publications using Django's existing logging configuration.
+- A review-only `docs/grc_gold_contract_additions.sql` DWH DDL template; GO does not execute or apply it.
 - Contract tests protecting existing Country, Project, and Operation API shapes.
 
 The detailed boundary and validation rules are in `grc_read_model/README.md`.
@@ -66,8 +70,9 @@ The detailed boundary and validation rules are in `grc_read_model/README.md`.
 Not implemented yet:
 
 - DWH credentials, deployment wiring, and execution against an updated Gold schema.
+- DWH-team application/backfill of the reviewed Gold DDL template and its timezone migration decision.
 - Scheduled two-hour execution.
-- Complete soft-delete reconciliation, quarantine storage, operational metrics, or alerting.
+- Reference deletion reconciliation, quarantine storage, external metrics collection, or alerting.
 - Operation/Appeal publication.
 - Activity, Funding, or Indicator publication.
 - API-source switching beyond publishing into the existing GO ORM cache.
@@ -123,7 +128,9 @@ Approved on 2026-08-21:
 - `factactivity.organizationkey` is the Activity lead organization.
 - Organization, geography, sector and operation relationships are resolved through Gold keys/FKs, never names.
 - `dimlocation` may contain ADM1, ADM2 and deeper levels. Non-ADM1 rows are valid but are not projected to GO District.
+- Event and Project location bridges may reference ADM2/deeper rows; version 1 validates the references but projects only ADM1 rows.
 - The consumed sync timestamps must be timezone-aware; the adapter rejects naive timestamps.
+- A source ingestion timestamp later than its repeatable-read transaction watermark is invalid and is rejected.
 
 ## Current test deployment
 
@@ -202,25 +209,28 @@ Database fixtures were loaded for this new test database. Do not rerun `loaddata
 
 ## Validation status
 
-- Both local Git worktrees were clean before this handover was added.
+- The Gold-contract and resilience checkpoint documented here was developed on top of the API starting baseline above; use `git log -1` for its final commit identity.
 - Changed Python files were previously syntax-parsed successfully.
 - Web whitespace/static checks were previously completed.
 - Docker images built successfully on the VM.
 - Django migrations and base fixtures completed on the VM.
 - API and Web smoke checks returned HTTP 200.
 - Targeted reference and Project projection/orchestration/Gold-reader/management-command tests have been added but still require execution in a complete Django environment.
+- Gold contract preflight and command tests have been added; the DDL template has not been applied to any database.
+- Event and Project bridge tests cover valid ADM2/deeper rows, missing location-dimension targets, null administrative levels, and duplicate links.
+- Sync status, structured log context, and watermark-boundary tests have been added.
 - Full API and frontend automated test suites have not yet been run in a complete local development environment.
 - No DWH rows are synchronized yet; Project and Operation screens therefore do not demonstrate real GRC data.
 
 ## Recommended next implementation sequence
 
-1. Apply `docs/grc_gold_contract_additions.md` with the DWH team.
-2. Add/ingest the approved GO identities and authoritative names in Gold.
-3. Decide dimension/bridge CDC and migrate/expose consumed timestamps as `timestamptz`.
-4. Apply the approved Gold additions, provision read-only DWH credentials, and validate `grc_sync_reference` against a non-production Gold database.
+1. Review and adapt `docs/grc_gold_contract_additions.sql` in the DWH deployment process; do not execute it from GO.
+2. Add/backfill the approved GO identities and authoritative names in Gold.
+3. Decide dimension/bridge CDC and migrate/expose consumed timestamps as `timestamptz` without assuming the timezone of existing values.
+4. Provision read-only DWH credentials, run `grc_check_dwh_contract`, then validate `grc_sync_reference` against a non-production Gold database.
 5. Validate `grc_sync_projects` against the same non-production Gold database after reference publication.
 6. Approve the Operation/Appeal type mapping and Activity controlled-output mappings, then implement those publishers while keeping financial fields unavailable until the financial DWH phase.
-7. Add scheduled execution, metrics, quarantine reporting, and safe publication failure handling.
+7. Add scheduled execution, external metrics/alerts, quarantine reporting, and reference deletion reconciliation.
 8. Replace the smoke-test deployment with a production WSGI/ASGI setup, reverse proxy, TLS, backups, and the trusted Entra authentication proxy.
 9. Implement version-2 Country Profile and SharePoint enhancements separately.
 

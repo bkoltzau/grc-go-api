@@ -125,7 +125,13 @@ def _validate_event_geography(row: Mapping[str, object]) -> None:
     if row.get("unmappedcountrycount") != 0:
         raise GRCDWHReadError(f"GO Event {event_id} has a country bridge without a mapped gocountryid")
     if row.get("unmappeddistrictcount") != 0:
-        raise GRCDWHReadError(f"GO Event {event_id} has a location bridge without a mapped godistrictid")
+        raise GRCDWHReadError(f"GO Event {event_id} has an ADM1 location without a mapped godistrictid")
+    if row.get("missinglocationcount") != 0:
+        raise GRCDWHReadError(f"GO Event {event_id} has a location bridge without a dimlocation row")
+    if row.get("unknownadminlevelcount") != 0:
+        raise GRCDWHReadError(f"GO Event {event_id} has a location without an adminlevel")
+    if row.get("duplicatelocationcount") != 0:
+        raise GRCDWHReadError(f"GO Event {event_id} has a duplicate location bridge")
     if row.get("bridgeprimarycount") != 1:
         raise GRCDWHReadError(f"GO Event {event_id} must have exactly one primary country bridge")
     if row.get("primarygocountryid") is None:
@@ -231,7 +237,11 @@ def _event_query(schema: str) -> str:
             country_rows.bridgeprimarycount,
             country_rows.bridgeprimarygocountryid,
             country_rows.unmappedcountrycount,
-            COALESCE(location_rows.unmappeddistrictcount, 0) AS unmappeddistrictcount
+            COALESCE(location_rows.unmappeddistrictcount, 0) AS unmappeddistrictcount,
+            COALESCE(location_rows.missinglocationcount, 0) AS missinglocationcount,
+            COALESCE(location_rows.otheradminlevelcount, 0) AS otheradminlevelcount,
+            COALESCE(location_rows.unknownadminlevelcount, 0) AS unknownadminlevelcount,
+            COALESCE(location_rows.duplicatelocationcount, 0) AS duplicatelocationcount
         FROM {events} AS event
         JOIN {disaster_types} AS disaster_type
             ON disaster_type.disastertypekey = event.disastertypekey
@@ -252,8 +262,18 @@ def _event_query(schema: str) -> str:
         LEFT JOIN LATERAL (
             SELECT
                 array_agg(location.godistrictid ORDER BY location.godistrictid)
-                    FILTER (WHERE location.godistrictid IS NOT NULL) AS godistrictids,
-                count(*) FILTER (WHERE location.godistrictid IS NULL) AS unmappeddistrictcount
+                    FILTER (WHERE location.adminlevel = 1 AND location.godistrictid IS NOT NULL)
+                    AS godistrictids,
+                count(*) FILTER (
+                    WHERE location.adminlevel = 1 AND location.godistrictid IS NULL
+                ) AS unmappeddistrictcount,
+                count(*) FILTER (WHERE location.locationkey IS NULL) AS missinglocationcount,
+                count(*) FILTER (WHERE location.adminlevel <> 1) AS otheradminlevelcount,
+                count(*) FILTER (
+                    WHERE location.locationkey IS NOT NULL AND location.adminlevel IS NULL
+                ) AS unknownadminlevelcount,
+                count(bridge.locationkey) - count(DISTINCT bridge.locationkey)
+                    AS duplicatelocationcount
             FROM {event_locations} AS bridge
             LEFT JOIN {locations} AS location ON location.locationkey = bridge.locationkey
             WHERE bridge.disastereventkey = event.disastereventkey

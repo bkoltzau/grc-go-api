@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase
 
-from grc_read_model.grc_project_projection import GRCProjectPublicationResult
+from grc_read_model.grc_project_projection import GRCGoldProjectDeletion, GRCProjectPublicationResult
 from grc_read_model.grc_project_sync import (
     GRCGoldProjectSnapshot,
     GRCProjectSyncError,
@@ -35,6 +35,35 @@ class GRCGoldProjectSnapshotTest(SimpleTestCase):
         self.assertEqual(snapshot.projects, ())
         with self.assertRaisesRegex(GRCProjectSyncError, "timezone-aware"):
             empty_snapshot(datetime(2026, 8, 21))
+
+    def test_rejects_ingestion_timestamp_after_transaction_watermark(self):
+        watermark = datetime(2026, 8, 21, tzinfo=timezone.utc)
+
+        with self.assertRaisesRegex(GRCProjectSyncError, "later than the Gold transaction watermark"):
+            GRCGoldProjectSnapshot(
+                sectors=[],
+                projects=[],
+                deletions=[
+                    GRCGoldProjectDeletion(
+                        project_id=7001,
+                        ingested_at=datetime(2026, 8, 22, tzinfo=timezone.utc),
+                    )
+                ],
+                watermark=watermark,
+            )
+
+        with self.assertRaisesRegex(GRCProjectSyncError, "invalid ingestion timestamps"):
+            GRCGoldProjectSnapshot(
+                sectors=[],
+                projects=[],
+                deletions=[
+                    GRCGoldProjectDeletion(
+                        project_id=7001,
+                        ingested_at=datetime(2026, 8, 20),
+                    )
+                ],
+                watermark=watermark,
+            )
 
 
 class GRCProjectSyncTest(TestCase):

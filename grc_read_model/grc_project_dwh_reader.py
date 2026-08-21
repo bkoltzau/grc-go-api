@@ -92,6 +92,8 @@ def _project_query(schema: str) -> str:
             location_rows.unmappeddistrictcount,
             location_rows.missinglocationcount,
             location_rows.otheradminlevelcount,
+            location_rows.unknownadminlevelcount,
+            location_rows.duplicatelocationcount,
             primary_operation.primaryoperationcount,
             primary_operation.unmappedeventcount,
             primary_operation.unmappeddisastertypecount
@@ -136,7 +138,12 @@ def _project_query(schema: str) -> str:
                 count(*) FILTER (WHERE location.locationkey IS NULL)
                     AS missinglocationcount,
                 count(*) FILTER (WHERE location.adminlevel <> 1)
-                    AS otheradminlevelcount
+                    AS otheradminlevelcount,
+                count(*) FILTER (
+                    WHERE location.locationkey IS NOT NULL AND location.adminlevel IS NULL
+                ) AS unknownadminlevelcount,
+                count(bridge.locationkey) - count(DISTINCT bridge.locationkey)
+                    AS duplicatelocationcount
             FROM {project_locations} AS bridge
             LEFT JOIN {locations} AS location ON location.locationkey = bridge.locationkey
             WHERE bridge.projectid = project.projectid
@@ -188,6 +195,10 @@ def _validate_project_relationships(row: Mapping[str, object]) -> None:
         raise GRCDWHReadError(f"Gold Project {project_id} has an ADM1 location without a mapped godistrictid")
     if row.get("missinglocationcount") != 0:
         raise GRCDWHReadError(f"Gold Project {project_id} has a location bridge without a dimlocation row")
+    if row.get("unknownadminlevelcount") != 0:
+        raise GRCDWHReadError(f"Gold Project {project_id} has a location without an adminlevel")
+    if row.get("duplicatelocationcount") != 0:
+        raise GRCDWHReadError(f"Gold Project {project_id} has a duplicate location bridge")
     if row.get("primaryoperationcount") not in (0, 1):
         raise GRCDWHReadError(f"Gold Project {project_id} must have at most one primary Operation")
     if row.get("primaryoperationcount") == 1 and row.get("unmappedeventcount") != 0:

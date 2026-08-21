@@ -153,6 +153,15 @@ class GRCGoldReferenceSnapshotTest(SimpleTestCase):
                 watermark=datetime(2026, 8, 10, tzinfo=timezone.utc),
             )
 
+    def test_rejects_ingestion_timestamp_after_transaction_watermark(self):
+        watermark = datetime(2026, 8, 10, tzinfo=timezone.utc)
+
+        with self.assertRaisesRegex(GRCReferenceSyncError, "later than the Gold transaction watermark"):
+            reference_snapshot(
+                watermark,
+                country_overrides={"ingestedat": datetime(2026, 8, 11, tzinfo=timezone.utc)},
+            )
+
 
 class GRCReferenceSyncTest(TestCase):
     def setUp(self):

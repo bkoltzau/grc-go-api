@@ -136,9 +136,9 @@ Inactive Events are deliberately rejected because upstream Event has no
 deprecation field. Safe deletion reconciliation remains orchestration work; the
 active publisher does not guess by assigning a different visibility or parent.
 
-## Future publication rules
+## Publication invariants
 
-The future `grc_sync` implementation should:
+Every GRC publisher should:
 
 1. Read and transform Gold data outside request handling.
 2. Resolve stable identities through `GRCSourceRecord`.
@@ -162,6 +162,9 @@ one outer database transaction. The watermark and successful run state advance
 in that same transaction. If any downstream projection fails, all serving-cache
 and source-record changes roll back, the previous successful watermark remains
 unchanged, and the run is retained with failed status and the error type.
+Source ingestion timestamps later than the repeatable-read transaction
+watermark are also rejected, preventing a run from claiming a checkpoint older
+than data it has already published.
 
 A complete Country snapshot must be non-empty so an upstream extraction failure
 cannot be mistaken for a valid publication. District and Event snapshots may be
@@ -205,13 +208,36 @@ The readers deliberately query the version-one additions documented in
 `docs/grc_gold_contract_additions.md`. They will fail until those fields and the
 Event country/location bridges exist. It rejects incomplete Event geography,
 including unmapped bridge rows, missing or multiple primary-country flags, and a
-primary bridge that disagrees with `dimdisasterevent.primarycountrykey`.
+primary bridge that disagrees with `dimdisasterevent.primarycountrykey`. Event
+location bridges may contain ADM2 or deeper locations; version 1 validates but
+projects only mapped ADM1 rows into GO District relationships. Missing
+`dimlocation` targets, null administrative levels, and duplicate location links
+are rejected instead of being silently ignored.
 
 `grc_project_dwh_reader.py` independently loads Project sectors, active Project
 rows, relationships and fact tombstones in another read-only repeatable-read
 snapshot. It enforces the approved all-sector bridge rule, accepts non-ADM1
-location rows without projecting them, and requires at most one primary
-Operation whose Event and DisasterType resolve to explicit GO IDs.
+location rows without projecting them, rejects missing/ambiguous/duplicate
+location relationships, and requires at most one primary Operation whose Event
+and DisasterType resolve to explicit GO IDs.
+
+Before extraction, `grc_dwh_contract.py` can inspect the configured Gold
+database's `information_schema` without writing to Gold or GO. It validates the
+tables, columns, character capacity, and timezone-aware timestamp types used by
+the implemented reference and Project readers. The companion
+`docs/grc_gold_contract_additions.sql` is a DWH-team review template, not an
+application migration; in particular it refuses to guess the timezone of
+existing naive fact timestamps.
+
+Run the read-only preflight with either or both scopes:
+
+```bash
+python manage.py grc_check_dwh_contract --scope reference --scope project
+```
+
+This command is safe while the serving process uses `DJANGO_READ_ONLY=true`.
+It checks schema compatibility, not data completeness or mapping correctness;
+the typed readers and publishers continue to enforce row-level semantics.
 
 Run a configured, write-authorized publication process with:
 
@@ -225,3 +251,15 @@ extraction and transactional publication to their domain orchestrators. They do
 not schedule themselves, store DWH credentials, add fallback values, or alter
 request-time API queries. Reference publication must complete before Project
 publication so the required GO cache identities exist.
+
+Each publication emits start, success, and failure records through Django's
+existing logging configuration with the run ID, pipeline, watermark, and row
+counters. Inspect the durable database state without enabling writes using:
+
+```bash
+python manage.py grc_sync_status
+python manage.py grc_sync_status --json
+```
+
+The JSON form is suitable for a later scheduler or monitoring probe. This is a
+read-only status surface, not an alerting or metrics-backend integration.
