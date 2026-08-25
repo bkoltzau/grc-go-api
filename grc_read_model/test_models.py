@@ -49,6 +49,15 @@ class GRCReadModelMetadataTest(TestCase):
 
         self.assertNotEqual(project_record.pk, activity_record.pk)
 
+    def test_target_identity_is_unique_within_a_source_entity_stream(self):
+        self.create_source_record()
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.create_source_record(
+                source_id="project-456",
+                target_object_id=self.target.pk,
+            )
+
     def test_state_is_unique_per_source_stream(self):
         GRCReadModelState.objects.create(
             source_system="grc_gold",

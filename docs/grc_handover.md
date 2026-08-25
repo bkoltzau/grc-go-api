@@ -1,6 +1,6 @@
 # GRC GO handover
 
-Status date: 2026-08-21
+Status date: 2026-08-25
 
 This is the continuation point for the GRC/DRK adaptation of IFRC GO. The implementation starts from fresh IFRC GO forks and follows the minimal-diff rule: preserve upstream pages and API contracts, prefer configuration and isolated `grc_` adapters, and keep the DWH behind the existing GO serving model.
 
@@ -8,7 +8,7 @@ This is the continuation point for the GRC/DRK adaptation of IFRC GO. The implem
 
 | Repository | Local checkout | Branch | Starting baseline | Remote branch |
 |---|---|---|---|---|
-| API | `C:\Users\koltzaub\Code\GRC-GO\grc-go-api` | `grc/read-model` | `204689fb` (`Add GRC Gold reference and project sync`) | `bkoltzau/grc-go-api:grc/read-model` |
+| API | `C:\Users\koltzaub\Code\GRC-GO\grc-go-api` | `grc/read-model` | `31709e79` (`Add Gold contract checks and sync safeguards`) | `bkoltzau/grc-go-api:grc/read-model` |
 | Web | `C:\Users\koltzaub\Code\grc-go-web-app` | `grc/project-ui` | `81954fe9` (`Restore GRC project views and module configuration`) | `bkoltzau/grc-go-web-app:grc/project-ui` |
 
 Both repositories have read-only `upstream` remotes pointing at the corresponding IFRC GO repositories. The personal branches are intentional; no pull request has been opened yet.
@@ -29,7 +29,13 @@ Do not commit `.env` files, credentials, generated database data, or GitHub toke
 - GO reference data is ingested into Gold first, optional GRC corrections happen in Gold, and GO then consumes the projected data from Gold.
 - Gold remains the structured-data source of truth. GO ORM tables act as the serving/read-model cache.
 - The deployment is read-only from the user perspective. Synchronization will use a separate write-capable process later.
-- Funding belongs to Projects. Detailed financial data is deferred to the next DWH phase; unavailable Operation requested/funded values must remain missing rather than becoming guessed zeroes.
+- Funding belongs to Projects. Detailed financial data is deferred to the next DWH phase. Because upstream Appeal fields are non-null, version 1 may use explicit `0.0` compatibility placeholders that mean "not yet supplied" and must never feed aggregates.
+- Gold assigns an immutable `grc_source_id` UUID to every entity. GO-sourced rows may also carry the exact original GO integer ID; GRC-only rows receive a GO target ID during publication and retain it through the UUID mapping.
+- Publish every valid in-scope Country/Event/reference row and every valid non-deleted Project; no additional business filter applies in version 1.
+- Formally use repeatable-read complete snapshots plus deterministic content-hash comparison every two hours. Every consumed bridge is a complete relationship snapshot.
+- Existing naive timestamps are Berlin local civil time: `W. Europe Standard Time` for Microsoft systems and `Europe/Berlin` for PostgreSQL.
+- `adminlevel = 1` is ADM1 and `adminlevel = 2` is ADM2. Version 1 projects only ADM1; deeper levels remain valid Gold data.
+- Operation type uses exact `goappealtypeid`; the DWH must assign it when an Operation has no GO origin. The adapter does not match labels.
 - Existing GO controlled values are reused for sectors, indicators, disaggregation, disaster types, and other compatible reference domains.
 - English is the only required language for version 1.
 - Existing GO document/link metadata with stable SharePoint URLs is the planned version-1 document approach. No SharePoint binary-copy integration is implemented.
@@ -45,6 +51,11 @@ Implemented metadata tables:
 - `grc_source_record`: stable Gold identity to GO cache-row identity, content hash, ingestion time, and soft-delete state.
 - `grc_sync_run`: publication attempt, counters, status, watermark range, and failure details.
 - `grc_read_model_state`: last successfully published watermark per source stream.
+
+The source identity is now a canonical DWH UUID. `GRCSourceRecord` maps it to
+the existing GO integer primary key, preserving every upstream API/frontend
+route. A database constraint prevents two UUIDs in the same source/entity
+stream from claiming one GO target.
 
 Implemented projection/validation components:
 
@@ -109,16 +120,23 @@ The initial GRC configuration hides the language selector and retains English. A
 - Explicit primary and secondary Project-sector identities.
 - Controlled organization types and Project/Activity organization roles.
 
-Do not invent mappings. In particular, Event names are not Operation names, activity-type names are not Activity titles, organization names do not prove National Society identity, and missing funding values are not zero.
+Do not invent mappings. In particular, Event names are not Operation names, activity-type names are not Activity titles, and organization names do not prove National Society identity. Operation funding placeholders are explicit technical debt, not financial observations.
 
 Open data-contract decisions:
 
-- Confirm Appeal/Operation type mapping.
 - Confirm how deployed ERUs occur and are identified.
 - Approve the exact GO indicator/disaggregation mapping and non-double-counting grain.
-- Confirm dimension/bridge CDC support; otherwise use full snapshot/hash comparison.
-- Apply or expose consumed ingestion timestamps as timezone-aware `timestamptz` values.
-- Confirm the source's `adminlevel` assignment rule; version 1 only maps level 1 to GO District and leaves Admin2/deeper rows in Gold.
+- Backfill exact `goappealtypeid`, an authoritative Appeal `aid`, and timestamp-level Operation dates before enabling Operation publication.
+- Decide the UI label for temporary Operation financial placeholders.
+
+Deferred user input (explicitly postponed after the 2026-08-25 decisions):
+
+- Activity publication grain and deployed-ERU representation
+- Remaining Project/Activity organization-role semantics
+- Invalid-row quarantine and partial-publication policy beyond current fail-safe transactions
+- Frontend read-only affordances beyond the existing module configuration
+- DWH credentials, environment-specific deployment wiring, scheduler ownership, monitoring, and alerting
+- SharePoint metadata details and trusted-proxy/Entra authentication
 
 Approved on 2026-08-21:
 
@@ -131,6 +149,9 @@ Approved on 2026-08-21:
 - Event and Project location bridges may reference ADM2/deeper rows; version 1 validates the references but projects only ADM1 rows.
 - The consumed sync timestamps must be timezone-aware; the adapter rejects naive timestamps.
 - A source ingestion timestamp later than its repeatable-read transaction watermark is invalid and is rejected.
+- `grc_source_id` UUID is the cross-load Gold identity; Gold surrogate keys are relationship keys, not public GO IDs.
+- Optional `gocountryid`, `godistrictid`, `goeventid`, `goprojectid`, and later `goappealid` preserve original GO targets only when they exist.
+- Complete bridge semantics remove an absent relationship on the next successful snapshot; duplicate/null/unresolved associations fail the transaction.
 
 ## Current test deployment
 
@@ -226,10 +247,10 @@ Database fixtures were loaded for this new test database. Do not rerun `loaddata
 
 1. Review and adapt `docs/grc_gold_contract_additions.sql` in the DWH deployment process; do not execute it from GO.
 2. Add/backfill the approved GO identities and authoritative names in Gold.
-3. Decide dimension/bridge CDC and migrate/expose consumed timestamps as `timestamptz` without assuming the timezone of existing values.
+3. Backfill immutable UUIDs and apply/review the approved Berlin-local to `timestamptz` conversion, including DST edge cases.
 4. Provision read-only DWH credentials, run `grc_check_dwh_contract`, then validate `grc_sync_reference` against a non-production Gold database.
 5. Validate `grc_sync_projects` against the same non-production Gold database after reference publication.
-6. Approve the Operation/Appeal type mapping and Activity controlled-output mappings, then implement those publishers while keeping financial fields unavailable until the financial DWH phase.
+6. Backfill exact Appeal type IDs and the remaining Appeal identifiers/timestamps; then implement Operations with documented non-aggregate `0.0` financial placeholders. Activity mappings remain a separate approval.
 7. Add scheduled execution, external metrics/alerts, quarantine reporting, and reference deletion reconciliation.
 8. Replace the smoke-test deployment with a production WSGI/ASGI setup, reverse proxy, TLS, backups, and the trusted Entra authentication proxy.
 9. Implement version-2 Country Profile and SharePoint enhancements separately.

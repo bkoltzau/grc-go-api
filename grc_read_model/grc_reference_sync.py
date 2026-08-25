@@ -60,9 +60,9 @@ class GRCGoldReferenceSnapshot:
             raise GRCReferenceSyncError("countries must contain a complete non-empty dimcountry snapshot")
 
         ingestion_id_fields = {
-            "countries": "go_country_id",
-            "districts": "go_district_id",
-            "events": "go_event_id",
+            "countries": "source_id",
+            "districts": "source_id",
+            "events": "source_id",
         }
         for field, id_field in ingestion_id_fields.items():
             invalid_timestamp_ids = [

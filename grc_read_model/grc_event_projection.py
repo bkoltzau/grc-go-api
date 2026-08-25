@@ -3,17 +3,39 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import UUID
 
-from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from django.utils import timezone
 
 from api.models import AlertLevel, Country, DisasterType, District, Event, VisibilityChoices
-from grc_read_model.models import GRCEntityType, GRCSourceRecord, GRCSyncRun
+from grc_read_model.grc_identity import (
+    GRCIdentityError,
+    grc_source_content_matches,
+    parse_grc_source_id,
+    publish_grc_source_record,
+    resolve_grc_target_id as _resolve_grc_target_id,
+    resolve_grc_target_map as _resolve_grc_target_map,
+)
+from grc_read_model.models import GRCEntityType, GRCSyncRun
 
 
 class GRCEventProjectionError(ValueError):
     pass
+
+
+def _resolve_target_id(**kwargs) -> int | None:
+    try:
+        return _resolve_grc_target_id(**kwargs)
+    except GRCIdentityError as exc:
+        raise GRCEventProjectionError(str(exc)) from exc
+
+
+def _resolve_target_map(**kwargs) -> dict[UUID, int]:
+    try:
+        return _resolve_grc_target_map(**kwargs)
+    except GRCIdentityError as exc:
+        raise GRCEventProjectionError(str(exc)) from exc
 
 
 def _required_int(row: Mapping[str, object], field: str, *, allow_zero: bool = False) -> int:
@@ -76,15 +98,15 @@ def _required_datetime(row: Mapping[str, object], field: str) -> datetime:
     return value
 
 
-def _integer_tuple(row: Mapping[str, object], field: str, *, required: bool) -> tuple[int, ...]:
+def _uuid_tuple(row: Mapping[str, object], field: str, *, required: bool) -> tuple[UUID, ...]:
     value = row.get(field)
     if not isinstance(value, (list, tuple)):
-        raise GRCEventProjectionError(f"{field} must be a list or tuple of GO IDs")
-    normalized = tuple(_required_int({field: item}, field) for item in value)
+        raise GRCEventProjectionError(f"{field} must be a list or tuple of UUIDs")
+    normalized = tuple(parse_grc_source_id(item, field) for item in value)
     if required and not normalized:
-        raise GRCEventProjectionError(f"{field} must contain at least one GO ID")
+        raise GRCEventProjectionError(f"{field} must contain at least one UUID")
     if len(normalized) != len(set(normalized)):
-        raise GRCEventProjectionError(f"{field} must not contain duplicate GO IDs")
+        raise GRCEventProjectionError(f"{field} must not contain duplicate UUIDs")
     return normalized
 
 
@@ -143,8 +165,9 @@ def validate_grc_disaster_types(
 
 @dataclass(frozen=True)
 class GRCGoldDisasterEvent:
+    source_id: UUID
     disaster_event_key: int
-    go_event_id: int
+    go_event_id: int | None
     go_disaster_type_id: int
     name: str
     glide: str
@@ -153,8 +176,8 @@ class GRCGoldDisasterEvent:
     people_affected: int | None
     ifrc_severity_level: int
     ifrc_severity_level_updated_at: datetime | None
-    go_country_ids: tuple[int, ...]
-    go_district_ids: tuple[int, ...]
+    country_source_ids: tuple[UUID, ...]
+    district_source_ids: tuple[UUID, ...]
     is_active: bool
     source_updated_at: datetime | None
     ingested_at: datetime | None
@@ -167,8 +190,9 @@ class GRCGoldDisasterEvent:
             raise GRCEventProjectionError(f"goifrcseveritylevelid must be an exact GO value ({supported})")
 
         return cls(
+            source_id=parse_grc_source_id(row.get("grc_source_id")),
             disaster_event_key=_required_int(row, "disastereventkey"),
-            go_event_id=_required_int(row, "goeventid"),
+            go_event_id=_optional_int(row, "goeventid"),
             go_disaster_type_id=_required_int(row, "godisastertypeid"),
             name=_required_string(row, "name", 256),
             glide=_optional_string(row, "glide", 18),
@@ -177,8 +201,8 @@ class GRCGoldDisasterEvent:
             people_affected=_optional_int(row, "peopleaffected", allow_zero=True),
             ifrc_severity_level=severity,
             ifrc_severity_level_updated_at=_optional_datetime(row, "ifrcseveritylevelupdatedat"),
-            go_country_ids=_integer_tuple(row, "gocountryids", required=True),
-            go_district_ids=_integer_tuple(row, "godistrictids", required=False),
+            country_source_ids=_uuid_tuple(row, "country_grc_source_ids", required=True),
+            district_source_ids=_uuid_tuple(row, "district_grc_source_ids", required=False),
             is_active=_required_bool(row, "isactive"),
             source_updated_at=_optional_datetime(row, "sourceupdatedat"),
             ingested_at=_optional_datetime(row, "ingestedat"),
@@ -189,10 +213,9 @@ class GRCGoldDisasterEvent:
             "description": self.description,
             "disaster_start_at": self.disaster_start_at.isoformat(),
             "glide": self.glide,
-            "go_country_ids": sorted(self.go_country_ids),
+            "country_source_ids": sorted(str(value) for value in self.country_source_ids),
             "go_disaster_type_id": self.go_disaster_type_id,
-            "go_district_ids": sorted(self.go_district_ids),
-            "go_event_id": self.go_event_id,
+            "district_source_ids": sorted(str(value) for value in self.district_source_ids),
             "ifrc_severity_level": self.ifrc_severity_level,
             "ifrc_severity_level_updated_at": (
                 self.ifrc_severity_level_updated_at.isoformat()
@@ -225,22 +248,25 @@ class GRCEventPublicationResult:
     rows_seen: int
     rows_created: int
     rows_updated: int
+    rows_unchanged: int = 0
 
 
 def _validate_event_batch(records: Sequence[GRCGoldDisasterEvent]) -> None:
     unique_fields = {
+        "grc_source_id": [record.source_id for record in records],
         "disastereventkey": [record.disaster_event_key for record in records],
-        "goeventid": [record.go_event_id for record in records],
+        "goeventid": [record.go_event_id for record in records if record.go_event_id is not None],
     }
     for field, values in unique_fields.items():
         if len(values) != len(set(values)):
             raise GRCEventProjectionError(f"duplicate {field} in dimdisasterevent snapshot")
 
-    inactive_ids = sorted(record.go_event_id for record in records if not record.is_active)
+    inactive_ids = sorted(str(record.source_id) for record in records if not record.is_active)
     if inactive_ids:
         values = ", ".join(str(value) for value in inactive_ids)
         raise GRCEventProjectionError(
-            f"inactive Events require deletion reconciliation and cannot be published as active rows: {values}"
+            "inactive Events require deletion reconciliation and cannot be published as active rows; "
+            f"source GUID(s): {values}"
         )
 
 
@@ -266,70 +292,102 @@ def publish_grc_event_snapshot(
         values = ", ".join(str(value) for value in sorted(missing_type_ids))
         raise GRCEventProjectionError(f"DisasterType reference must exist first; missing GO ID(s): {values}")
 
-    country_ids = {country_id for record in records for country_id in record.go_country_ids}
-    countries = Country.objects.select_related("region").in_bulk(country_ids)
-    missing_country_ids = country_ids - set(countries)
-    if missing_country_ids:
-        values = ", ".join(str(value) for value in sorted(missing_country_ids))
-        raise GRCEventProjectionError(f"Country projection must run first; missing GO ID(s): {values}")
+    country_target_ids = _resolve_target_map(
+        source_system=source_system,
+        entity_type=GRCEntityType.COUNTRY,
+        source_ids=(source_id for record in records for source_id in record.country_source_ids),
+        target_model=Country,
+    )
+    countries = Country.objects.select_related("region").in_bulk(country_target_ids.values())
 
-    countries_without_region = sorted(country_id for country_id, country in countries.items() if country.region_id is None)
+    countries_without_region = sorted(
+        country_id for country_id, country in countries.items() if country.region_id is None
+    )
     if countries_without_region:
         values = ", ".join(str(value) for value in countries_without_region)
         raise GRCEventProjectionError(f"Event countries require projected GO Region values: {values}")
 
-    district_ids = {district_id for record in records for district_id in record.go_district_ids}
-    districts = District.objects.in_bulk(district_ids)
-    missing_district_ids = district_ids - set(districts)
-    if missing_district_ids:
-        values = ", ".join(str(value) for value in sorted(missing_district_ids))
-        raise GRCEventProjectionError(f"District projection must run first; missing GO ID(s): {values}")
+    district_target_ids = _resolve_target_map(
+        source_system=source_system,
+        entity_type=GRCEntityType.DISTRICT,
+        source_ids=(source_id for record in records for source_id in record.district_source_ids),
+        target_model=District,
+    )
+    districts = District.objects.in_bulk(district_target_ids.values())
 
     for record in records:
         outside_country_ids = sorted(
-            district_id
-            for district_id in record.go_district_ids
-            if districts[district_id].country_id not in record.go_country_ids
+            str(district_source_id)
+            for district_source_id in record.district_source_ids
+            if districts[district_target_ids[district_source_id]].country_id
+            not in {country_target_ids[source_id] for source_id in record.country_source_ids}
         )
         if outside_country_ids:
             values = ", ".join(str(value) for value in outside_country_ids)
-            raise GRCEventProjectionError(f"Event districts must belong to an Event country; invalid GO ID(s): {values}")
+            raise GRCEventProjectionError(
+                f"Event districts must belong to an Event country; invalid source GUID(s): {values}"
+            )
 
     created_count = 0
+    unchanged_count = 0
     with transaction.atomic():
-        target_content_type = ContentType.objects.get_for_model(Event)
         published_at = timezone.now()
 
         for record in records:
-            event, created = Event.objects.update_or_create(
-                pk=record.go_event_id,
-                defaults=record.event_defaults(),
+            target_id = _resolve_target_id(
+                source_system=source_system,
+                entity_type=GRCEntityType.DISASTER_EVENT,
+                source_id=record.source_id,
+                target_model=Event,
+                preferred_target_id=record.go_event_id,
             )
+            unchanged_count += int(
+                grc_source_content_matches(
+                    source_system=source_system,
+                    entity_type=GRCEntityType.DISASTER_EVENT,
+                    source_id=record.source_id,
+                    target_model=Event,
+                    target_object_id=target_id,
+                    content_hash=record.content_hash(),
+                    is_deleted=False,
+                )
+            )
+            if target_id is None:
+                event = Event.objects.create(**record.event_defaults())
+                created = True
+            else:
+                event, created = Event.objects.update_or_create(
+                    pk=target_id,
+                    defaults=record.event_defaults(),
+                )
             created_count += int(created)
 
-            event_countries = [countries[country_id] for country_id in record.go_country_ids]
+            event_countries = [
+                countries[country_target_ids[source_id]] for source_id in record.country_source_ids
+            ]
             event.countries.set(event_countries)
             event.countries_for_preview.set(event_countries)
             event.regions.set({country.region_id for country in event_countries})
-            event.districts.set(record.go_district_ids)
+            event.districts.set(
+                district_target_ids[source_id] for source_id in record.district_source_ids
+            )
 
-            GRCSourceRecord.objects.update_or_create(
+            publish_grc_source_record(
                 source_system=source_system,
                 entity_type=GRCEntityType.DISASTER_EVENT,
-                source_id=str(record.go_event_id),
-                defaults={
-                    "source_ingested_at": record.ingested_at,
-                    "content_hash": record.content_hash(),
-                    "is_deleted": False,
-                    "target_content_type": target_content_type,
-                    "target_object_id": record.go_event_id,
-                    "last_successful_run": sync_run,
-                    "published_at": published_at,
-                },
+                source_id=record.source_id,
+                target_model=Event,
+                target_object_id=event.pk,
+                source_ingested_at=record.ingested_at,
+                content_hash=record.content_hash(),
+                is_deleted=False,
+                sync_run=sync_run,
+                published_at=published_at,
             )
 
     return GRCEventPublicationResult(
         rows_seen=len(records),
         rows_created=created_count,
         rows_updated=len(records) - created_count,
+        rows_unchanged=unchanged_count,
     )

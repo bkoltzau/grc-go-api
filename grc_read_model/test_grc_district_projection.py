@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 
 from django.contrib.gis.geos import Polygon
 from django.test import SimpleTestCase, TestCase
@@ -10,14 +11,22 @@ from grc_read_model.grc_district_projection import (
     GRCGoldDistrict,
     publish_grc_district_snapshot,
 )
+from grc_read_model.grc_identity import publish_grc_source_record
 from grc_read_model.models import GRCEntityType, GRCSourceRecord, GRCSyncRun
+
+
+COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000001")
+OTHER_COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000002")
+DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000001")
+OTHER_DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000002")
 
 
 def district_row(**overrides):
     row = {
+        "grc_source_id": DISTRICT_SOURCE_ID,
         "locationkey": 101,
         "godistrictid": 1001,
-        "gocountryid": 276,
+        "country_grc_source_id": COUNTRY_SOURCE_ID,
         "countrykey": 10,
         "adminlevel": 1,
         "pcode": "DE-BY",
@@ -37,11 +46,11 @@ class GRCGoldDistrictTest(SimpleTestCase):
         record = GRCGoldDistrict.from_gold_row(district_row())
 
         self.assertEqual(record.go_district_id, 1001)
-        self.assertEqual(record.go_country_id, 276)
+        self.assertEqual(record.country_source_id, COUNTRY_SOURCE_ID)
         self.assertEqual(record.admin_level, 1)
         self.assertEqual(len(record.content_hash()), 64)
 
-        defaults = record.district_defaults()
+        defaults = record.district_defaults(276)
         self.assertEqual(defaults["country_id"], 276)
         self.assertEqual(defaults["code"], "DE-BY")
         self.assertEqual(defaults["centroid"].srid, 4326)
@@ -51,6 +60,7 @@ class GRCGoldDistrictTest(SimpleTestCase):
         rekeyed = GRCGoldDistrict.from_gold_row(
             district_row(
                 locationkey=999,
+                godistrictid=None,
                 countrykey=9999,
                 sourceupdatedat=datetime(2026, 8, 3, tzinfo=timezone.utc),
                 ingestedat=datetime(2026, 8, 4, tzinfo=timezone.utc),
@@ -84,6 +94,17 @@ class GRCDistrictPublisherTest(TestCase):
             iso3="DEU",
         )
         self.sync_run = GRCSyncRun.objects.create(pipeline="dimlocation-adm1")
+        publish_grc_source_record(
+            source_system="grc_gold",
+            entity_type=GRCEntityType.COUNTRY,
+            source_id=COUNTRY_SOURCE_ID,
+            target_model=Country,
+            target_object_id=self.country.pk,
+            source_ingested_at=None,
+            content_hash="a" * 64,
+            is_deleted=False,
+            sync_run=self.sync_run,
+        )
 
     def test_publishes_into_existing_district_and_metadata(self):
         record = GRCGoldDistrict.from_gold_row(district_row())
@@ -104,7 +125,7 @@ class GRCDistrictPublisherTest(TestCase):
         source_record = GRCSourceRecord.objects.get(
             source_system="grc_gold",
             entity_type=GRCEntityType.DISTRICT,
-            source_id="1001",
+            source_id=str(DISTRICT_SOURCE_ID),
         )
         self.assertEqual(source_record.target_object, district)
         self.assertEqual(source_record.source_ingested_at, record.ingested_at)
@@ -128,12 +149,13 @@ class GRCDistrictPublisherTest(TestCase):
 
         self.assertEqual(first_result.rows_created, 0)
         self.assertEqual(second_result.rows_updated, 1)
+        self.assertEqual(second_result.rows_unchanged, 1)
         self.assertEqual(District.objects.count(), 1)
         district = District.objects.get(pk=1001)
         self.assertEqual(district.name, "Bavaria")
         self.assertTrue(district.is_enclave)
         self.assertEqual(district.bbox, original_bbox)
-        self.assertEqual(GRCSourceRecord.objects.count(), 1)
+        self.assertEqual(GRCSourceRecord.objects.count(), 2)
 
     def test_maps_inactive_to_deprecated_not_deleted(self):
         record = GRCGoldDistrict.from_gold_row(district_row(isactive=False))
@@ -142,7 +164,9 @@ class GRCDistrictPublisherTest(TestCase):
 
         self.assertEqual(result.rows_deprecated, 1)
         self.assertTrue(District.objects.get(pk=1001).is_deprecated)
-        self.assertFalse(GRCSourceRecord.objects.get(source_id="1001").is_deleted)
+        self.assertFalse(
+            GRCSourceRecord.objects.get(source_id=str(DISTRICT_SOURCE_ID)).is_deleted
+        )
 
     def test_requires_country_projection_to_exist_first(self):
         self.country.delete()
@@ -152,7 +176,9 @@ class GRCDistrictPublisherTest(TestCase):
             publish_grc_district_snapshot([record], self.sync_run)
 
         self.assertFalse(District.objects.exists())
-        self.assertFalse(GRCSourceRecord.objects.exists())
+        self.assertFalse(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.DISTRICT).exists()
+        )
 
     def test_rejects_duplicate_source_or_go_ids_before_writing(self):
         first = GRCGoldDistrict.from_gold_row(district_row())
@@ -160,7 +186,7 @@ class GRCDistrictPublisherTest(TestCase):
             district_row(godistrictid=1002)
         )
         duplicate_target = GRCGoldDistrict.from_gold_row(
-            district_row(locationkey=102)
+            district_row(locationkey=102, grc_source_id=OTHER_DISTRICT_SOURCE_ID)
         )
 
         for records in ([first, duplicate_source], [first, duplicate_target]):
@@ -168,25 +194,31 @@ class GRCDistrictPublisherTest(TestCase):
                 publish_grc_district_snapshot(records, self.sync_run)
 
         self.assertFalse(District.objects.exists())
-        self.assertFalse(GRCSourceRecord.objects.exists())
+        self.assertFalse(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.DISTRICT).exists()
+        )
 
     def test_rejects_conflicting_country_mapping_before_writing(self):
         first = GRCGoldDistrict.from_gold_row(district_row())
         conflicting_country = GRCGoldDistrict.from_gold_row(
             district_row(
                 locationkey=102,
+                grc_source_id=OTHER_DISTRICT_SOURCE_ID,
                 godistrictid=1002,
-                gocountryid=999,
+                country_grc_source_id=OTHER_COUNTRY_SOURCE_ID,
                 pcode="DE-BE",
                 name="Berlin",
             )
         )
 
-        with self.assertRaisesRegex(GRCDistrictProjectionError, "conflicting gocountryid"):
+        with self.assertRaisesRegex(GRCDistrictProjectionError, "conflicting grc_source_id"):
             publish_grc_district_snapshot([first, conflicting_country], self.sync_run)
 
         self.assertFalse(District.objects.exists())
-        self.assertFalse(GRCSourceRecord.objects.exists())
+        self.assertEqual(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.COUNTRY).count(),
+            1,
+        )
 
     def test_requires_saved_running_sync_run(self):
         record = GRCGoldDistrict.from_gold_row(district_row())
@@ -201,4 +233,6 @@ class GRCDistrictPublisherTest(TestCase):
                 publish_grc_district_snapshot([record], sync_run)
 
         self.assertFalse(District.objects.exists())
-        self.assertFalse(GRCSourceRecord.objects.exists())
+        self.assertFalse(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.DISTRICT).exists()
+        )

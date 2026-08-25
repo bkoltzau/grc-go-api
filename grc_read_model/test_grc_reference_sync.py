@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 
 from django.test import SimpleTestCase, TestCase
 
@@ -19,8 +20,15 @@ from grc_read_model.grc_reference_sync import (
 from grc_read_model.models import GRCReadModelState, GRCSourceRecord, GRCSyncRun
 
 
+COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000001")
+DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000001")
+MISSING_DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000099")
+EVENT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
+
+
 def country_record(**overrides):
     row = {
+        "grc_source_id": COUNTRY_SOURCE_ID,
         "countrykey": 10,
         "gocountryid": 276,
         "goregionid": 3,
@@ -33,6 +41,7 @@ def country_record(**overrides):
         "isactive": True,
         "independentflag": True,
         "sovereigncountrykey": None,
+        "sovereign_country_grc_source_id": None,
         "societyname": "German Red Cross",
         "centroidlatitude": Decimal("51.165691"),
         "centroidlongitude": Decimal("10.451526"),
@@ -49,9 +58,10 @@ def country_record(**overrides):
 
 def district_record(**overrides):
     row = {
+        "grc_source_id": DISTRICT_SOURCE_ID,
         "locationkey": 101,
         "godistrictid": 1001,
-        "gocountryid": 276,
+        "country_grc_source_id": COUNTRY_SOURCE_ID,
         "countrykey": 10,
         "adminlevel": 1,
         "pcode": "DE-BY",
@@ -80,6 +90,7 @@ def disaster_type_record(**overrides):
 
 def event_record(**overrides):
     row = {
+        "grc_source_id": EVENT_SOURCE_ID,
         "disastereventkey": 30,
         "goeventid": 3001,
         "godisastertypeid": 5,
@@ -90,8 +101,8 @@ def event_record(**overrides):
         "peopleaffected": 1000,
         "goifrcseveritylevelid": AlertLevel.ORANGE,
         "ifrcseveritylevelupdatedat": datetime(2026, 6, 2, tzinfo=timezone.utc),
-        "gocountryids": [276],
-        "godistrictids": [1001],
+        "country_grc_source_ids": [COUNTRY_SOURCE_ID],
+        "district_grc_source_ids": [DISTRICT_SOURCE_ID],
         "isactive": True,
         "sourceupdatedat": datetime(2026, 6, 3, tzinfo=timezone.utc),
         "ingestedat": datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -229,7 +240,9 @@ class GRCReferenceSyncTest(TestCase):
                 reference_snapshot(
                     failed_watermark,
                     country_overrides={"name": "Must roll back"},
-                    event_overrides={"godistrictids": [999]},
+                    event_overrides={
+                        "district_grc_source_ids": [MISSING_DISTRICT_SOURCE_ID]
+                    },
                 )
             )
 
@@ -249,7 +262,7 @@ class GRCReferenceSyncTest(TestCase):
         self.assertEqual(failed_run.source_watermark_from, first_watermark)
         self.assertEqual(failed_run.source_watermark_to, failed_watermark)
         self.assertEqual(failed_run.details, {"error_type": "GRCEventProjectionError"})
-        self.assertIn("District projection must run first", failed_run.error_message)
+        self.assertIn("missing published district source GUID", failed_run.error_message)
         self.assertIsNotNone(failed_run.completed_at)
 
     def test_rejects_regressive_watermark_without_touching_cache(self):

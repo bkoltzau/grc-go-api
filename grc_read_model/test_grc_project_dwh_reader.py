@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import UUID
 
 from django.test import SimpleTestCase
 from psycopg2 import extensions
@@ -8,6 +9,13 @@ from psycopg2 import extensions
 from deployments.models import OperationTypes, ProgrammeTypes, Statuses
 from grc_read_model.grc_dwh_reader import GRCDWHReadError, GRCDWHSettings
 from grc_read_model.grc_project_dwh_reader import load_grc_project_snapshot
+
+
+COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000001")
+DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000001")
+EVENT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
+PROJECT_SOURCE_ID = UUID("40000000-0000-0000-0000-000000000001")
+DELETED_PROJECT_SOURCE_ID = UUID("40000000-0000-0000-0000-000000000002")
 
 
 def project_snapshot_rows():
@@ -30,14 +38,16 @@ def project_snapshot_rows():
                 "name": "Health",
             },
         ],
-        "SELECT project.projectid, project.projectname": [
+        "SELECT project.grc_source_id, project.projectid": [
             {
+                "grc_source_id": PROJECT_SOURCE_ID,
                 "projectid": 7001,
+                "goprojectid": 7001,
                 "projectname": "Flood recovery",
-                "goreportingnscountryid": 276,
-                "goprojectcountryid": 276,
-                "godistrictids": [1001],
-                "goeventid": 3001,
+                "reporting_ns_country_grc_source_id": COUNTRY_SOURCE_ID,
+                "project_country_grc_source_id": COUNTRY_SOURCE_ID,
+                "district_grc_source_ids": [DISTRICT_SOURCE_ID],
+                "event_grc_source_id": EVENT_SOURCE_ID,
                 "godisastertypeid": 5,
                 "goprojectprimarysectorid": 0,
                 "goprojectsecondarysectortagids": [1],
@@ -65,9 +75,11 @@ def project_snapshot_rows():
                 "unmappeddisastertypecount": 0,
             }
         ],
-        'SELECT projectid, ingestedat FROM "public"."factproject"': [
+        'SELECT grc_source_id, projectid, goprojectid, ingestedat FROM "public"."factproject"': [
             {
+                "grc_source_id": DELETED_PROJECT_SOURCE_ID,
                 "projectid": 7002,
+                "goprojectid": None,
                 "ingestedat": watermark,
             }
         ],
@@ -142,10 +154,11 @@ class GRCProjectDWHReaderTest(SimpleTestCase):
 
         self.assertEqual(snapshot.watermark, rows["SELECT CURRENT_TIMESTAMP"][0]["watermark"])
         self.assertEqual(len(snapshot.sectors), 2)
-        self.assertEqual(snapshot.projects[0].project_id, 7001)
-        self.assertEqual(snapshot.projects[0].district_ids, (1001,))
+        self.assertEqual(snapshot.projects[0].project_key, 7001)
+        self.assertEqual(snapshot.projects[0].source_id, PROJECT_SOURCE_ID)
+        self.assertEqual(snapshot.projects[0].district_source_ids, (DISTRICT_SOURCE_ID,))
         self.assertEqual(snapshot.projects[0].secondary_sector_tag_ids, (1,))
-        self.assertEqual(snapshot.deletions[0].project_id, 7002)
+        self.assertEqual(snapshot.deletions[0].project_key, 7002)
         self.assertEqual(len(connection.queries), 4)
         self.assertEqual(
             connection.session_options,
@@ -160,7 +173,7 @@ class GRCProjectDWHReaderTest(SimpleTestCase):
 
     def test_rejects_incomplete_all_sector_bridge(self):
         rows = project_snapshot_rows()
-        rows["SELECT project.projectid, project.projectname"][0]["primarysectorbridgecount"] = 0
+        rows["SELECT project.grc_source_id, project.projectid"][0]["primarysectorbridgecount"] = 0
         connection = FakeConnection(rows)
 
         with self.assertRaisesRegex(GRCDWHReadError, "primary sectorkey exactly once"):
@@ -183,7 +196,7 @@ class GRCProjectDWHReaderTest(SimpleTestCase):
         }
         for field, message in invalid_counts.items():
             rows = project_snapshot_rows()
-            rows["SELECT project.projectid, project.projectname"][0][field] = 1
+            rows["SELECT project.grc_source_id, project.projectid"][0][field] = 1
             connection = FakeConnection(rows)
 
             with self.subTest(field=field), self.assertRaisesRegex(GRCDWHReadError, message):
@@ -201,7 +214,7 @@ class GRCProjectDWHReaderTest(SimpleTestCase):
 
     def test_rejects_multiple_primary_operations(self):
         rows = project_snapshot_rows()
-        rows["SELECT project.projectid, project.projectname"][0]["primaryoperationcount"] = 2
+        rows["SELECT project.grc_source_id, project.projectid"][0]["primaryoperationcount"] = 2
         connection = FakeConnection(rows)
 
         with self.assertRaisesRegex(GRCDWHReadError, "at most one primary Operation"):

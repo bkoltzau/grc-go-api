@@ -118,7 +118,10 @@ class GRCDWHContractTest(SimpleTestCase):
         rows = [
             row
             for row in rows
-            if not (row["table_name"] == "dimcountry" and row["column_name"] == "goregionid")
+            if not (
+                row["table_name"] == "dimcountry"
+                and row["column_name"] in {"grc_source_id", "goregionid"}
+            )
         ]
         for row in rows:
             if row["table_name"] == "factproject" and row["column_name"] == "ingestedat":
@@ -135,6 +138,7 @@ class GRCDWHContractTest(SimpleTestCase):
         self.assertFalse(report.is_compatible)
         self.assertEqual(report.missing_tables, ("bridgedisastereventlocation",))
         self.assertIn("dimcountry.goregionid", report.missing_columns)
+        self.assertIn("dimcountry.grc_source_id", report.missing_columns)
         mismatch_ids = {mismatch.identity for mismatch in report.incompatible_columns}
         self.assertEqual(
             mismatch_ids,

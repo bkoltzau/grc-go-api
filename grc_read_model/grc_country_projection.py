@@ -4,18 +4,32 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from uuid import UUID
 
-from django.contrib.contenttypes.models import ContentType
 from django.contrib.gis.geos import Point, Polygon
 from django.db import transaction
 from django.utils import timezone
 
 from api.models import Country, CountryType, Region, RegionName
-from grc_read_model.models import GRCEntityType, GRCSourceRecord, GRCSyncRun
+from grc_read_model.grc_identity import (
+    GRCIdentityError,
+    grc_source_content_matches,
+    parse_grc_source_id,
+    publish_grc_source_record,
+    resolve_grc_target_id as _resolve_grc_target_id,
+)
+from grc_read_model.models import GRCEntityType, GRCSyncRun
 
 
 class GRCCountryProjectionError(ValueError):
     pass
+
+
+def _resolve_target_id(**kwargs) -> int | None:
+    try:
+        return _resolve_grc_target_id(**kwargs)
+    except GRCIdentityError as exc:
+        raise GRCCountryProjectionError(str(exc)) from exc
 
 
 def _required_string(row: Mapping[str, object], field: str, max_length: int) -> str:
@@ -84,8 +98,9 @@ def _optional_datetime(row: Mapping[str, object], field: str) -> datetime | None
 
 @dataclass(frozen=True)
 class GRCGoldCountry:
+    source_id: UUID
     country_key: int
-    go_country_id: int
+    go_country_id: int | None
     go_region_id: int
     go_region_name_id: int
     go_record_type_id: int
@@ -97,6 +112,7 @@ class GRCGoldCountry:
     is_active: bool
     society_name: str | None
     sovereign_country_key: int | None
+    sovereign_country_source_id: UUID | None
     centroid_latitude: Decimal
     centroid_longitude: Decimal
     bbox_west: Decimal
@@ -145,8 +161,9 @@ class GRCGoldCountry:
             raise GRCCountryProjectionError("bbox south/north values are invalid")
 
         return cls(
+            source_id=parse_grc_source_id(row.get("grc_source_id")),
             country_key=_required_int(row, "countrykey"),
-            go_country_id=_required_int(row, "gocountryid"),
+            go_country_id=_optional_int(row, "gocountryid"),
             go_region_id=_required_int(row, "goregionid"),
             go_region_name_id=go_region_name_id,
             go_record_type_id=go_record_type_id,
@@ -158,6 +175,14 @@ class GRCGoldCountry:
             is_active=_required_bool(row, "isactive"),
             society_name=_optional_string(row, "societyname"),
             sovereign_country_key=_optional_int(row, "sovereigncountrykey"),
+            sovereign_country_source_id=(
+                parse_grc_source_id(
+                    row.get("sovereign_country_grc_source_id"),
+                    "sovereign_country_grc_source_id",
+                )
+                if row.get("sovereign_country_grc_source_id") is not None
+                else None
+            ),
             centroid_latitude=centroid_latitude,
             centroid_longitude=centroid_longitude,
             bbox_west=bbox_west,
@@ -172,8 +197,6 @@ class GRCGoldCountry:
         content = {
             "bbox": [str(self.bbox_west), str(self.bbox_south), str(self.bbox_east), str(self.bbox_north)],
             "centroid": [str(self.centroid_longitude), str(self.centroid_latitude)],
-            "country_key": self.country_key,
-            "go_country_id": self.go_country_id,
             "go_region_id": self.go_region_id,
             "go_region_name_id": self.go_region_name_id,
             "go_record_type_id": self.go_record_type_id,
@@ -184,7 +207,11 @@ class GRCGoldCountry:
             "name": self.name,
             "region_label": self.region_label,
             "society_name": self.society_name,
-            "sovereign_country_key": self.sovereign_country_key,
+            "sovereign_country_source_id": (
+                str(self.sovereign_country_source_id)
+                if self.sovereign_country_source_id is not None
+                else None
+            ),
         }
         serialized = json.dumps(content, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -215,12 +242,14 @@ class GRCCountryPublicationResult:
     rows_created: int
     rows_updated: int
     rows_deprecated: int
+    rows_unchanged: int = 0
 
 
 def _validate_country_batch(records: Sequence[GRCGoldCountry]) -> None:
     unique_fields = {
+        "grc_source_id": [record.source_id for record in records],
         "countrykey": [record.country_key for record in records],
-        "gocountryid": [record.go_country_id for record in records],
+        "gocountryid": [record.go_country_id for record in records if record.go_country_id is not None],
         "iso2": [record.iso2 for record in records],
         "iso3": [record.iso3 for record in records],
     }
@@ -237,6 +266,18 @@ def _validate_country_batch(records: Sequence[GRCGoldCountry]) -> None:
     if unresolved_sovereign_keys:
         values = ", ".join(str(value) for value in sorted(unresolved_sovereign_keys))
         raise GRCCountryProjectionError(f"unresolved sovereigncountrykey value(s): {values}")
+
+    country_sources_by_key = {record.country_key: record.source_id for record in records}
+    for record in records:
+        expected_source_id = (
+            country_sources_by_key[record.sovereign_country_key]
+            if record.sovereign_country_key is not None
+            else None
+        )
+        if record.sovereign_country_source_id != expected_source_id:
+            raise GRCCountryProjectionError(
+                f"countrykey {record.country_key} has inconsistent sovereign Country identity"
+            )
 
     region_values: dict[int, tuple[int, str]] = {}
     for record in records:
@@ -266,6 +307,7 @@ def publish_grc_country_snapshot(
 
     created_count = 0
     deprecated_count = 0
+    unchanged_count = 0
 
     with transaction.atomic():
         region_rows = {
@@ -280,40 +322,62 @@ def publish_grc_country_snapshot(
                 },
             )
 
-        countries_by_source_key: dict[int, Country] = {}
+        countries_by_source_id: dict[UUID, Country] = {}
         for record in records:
-            country, created = Country.objects.update_or_create(
-                pk=record.go_country_id,
-                defaults=record.country_defaults(),
+            target_id = _resolve_target_id(
+                source_system=source_system,
+                entity_type=GRCEntityType.COUNTRY,
+                source_id=record.source_id,
+                target_model=Country,
+                preferred_target_id=record.go_country_id,
             )
-            countries_by_source_key[record.country_key] = country
+            unchanged_count += int(
+                grc_source_content_matches(
+                    source_system=source_system,
+                    entity_type=GRCEntityType.COUNTRY,
+                    source_id=record.source_id,
+                    target_model=Country,
+                    target_object_id=target_id,
+                    content_hash=record.content_hash(),
+                    is_deleted=False,
+                )
+            )
+            if target_id is None:
+                country = Country.objects.create(**record.country_defaults())
+                created = True
+            else:
+                country, created = Country.objects.update_or_create(
+                    pk=target_id,
+                    defaults=record.country_defaults(),
+                )
+            countries_by_source_id[record.source_id] = country
             created_count += int(created)
             deprecated_count += int(country.is_deprecated)
 
         for record in records:
             sovereign_state_id = (
-                countries_by_source_key[record.sovereign_country_key].pk
-                if record.sovereign_country_key is not None
+                countries_by_source_id[record.sovereign_country_source_id].pk
+                if record.sovereign_country_source_id is not None
                 else None
             )
-            Country.objects.filter(pk=record.go_country_id).update(sovereign_state_id=sovereign_state_id)
+            Country.objects.filter(pk=countries_by_source_id[record.source_id].pk).update(
+                sovereign_state_id=sovereign_state_id
+            )
 
-        target_content_type = ContentType.objects.get_for_model(Country)
         published_at = timezone.now()
         for record in records:
-            GRCSourceRecord.objects.update_or_create(
+            country = countries_by_source_id[record.source_id]
+            publish_grc_source_record(
                 source_system=source_system,
                 entity_type=GRCEntityType.COUNTRY,
-                source_id=str(record.go_country_id),
-                defaults={
-                    "source_ingested_at": record.ingested_at,
-                    "content_hash": record.content_hash(),
-                    "is_deleted": False,
-                    "target_content_type": target_content_type,
-                    "target_object_id": record.go_country_id,
-                    "last_successful_run": sync_run,
-                    "published_at": published_at,
-                },
+                source_id=record.source_id,
+                target_model=Country,
+                target_object_id=country.pk,
+                source_ingested_at=record.ingested_at,
+                content_hash=record.content_hash(),
+                is_deleted=False,
+                sync_run=sync_run,
+                published_at=published_at,
             )
 
     return GRCCountryPublicationResult(
@@ -321,4 +385,5 @@ def publish_grc_country_snapshot(
         rows_created=created_count,
         rows_updated=len(records) - created_count,
         rows_deprecated=deprecated_count,
+        rows_unchanged=unchanged_count,
     )

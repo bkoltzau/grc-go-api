@@ -19,11 +19,11 @@ Publication into these tables is conditional on their existing required fields. 
 
 The serving API should reuse upstream's existing `DJANGO_READ_ONLY=true` setting. The future scheduled publisher must run separately with write access and narrowly scoped database credentials; read-only mode should not be disabled on the serving API to accommodate synchronization.
 
-The known version-one mismatch is Operation funding. GO's `Appeal` model requires numeric requested and funded amounts, while the approved Gold contract defers those values. The future publisher must not write guessed zeroes. That mismatch remains documented debt and requires an isolated adapter or a later Gold financial source before Operations can expose those fields truthfully.
+The known version-one mismatch is Operation funding. GO's `Appeal` model requires numeric requested and funded amounts, while the approved Gold contract defers those values. The future publisher may use explicit `0.0` compatibility placeholders, documented and labelled as unavailable rather than observed zero. They must not feed aggregates. Authoritative financial publication remains later DWH work.
 
 ## Metadata tables
 
-- `grc_source_record` maps a stable Gold source identity to the integer primary key of the GO cache row. Its source hash and ingestion timestamp support idempotent and incremental processing. `is_deleted` records Gold soft-delete state.
+- `grc_source_record` maps a DWH-owned immutable `grc_source_id` UUID to the integer primary key of the GO cache row. Its source hash and ingestion timestamp support idempotent complete-snapshot comparison. `is_deleted` records Gold soft-delete state.
 - `grc_sync_run` records a publication attempt, its source watermark range, counters, status, and failure details.
 - `grc_read_model_state` stores the last successfully published watermark per source stream.
 
@@ -37,18 +37,19 @@ contract, validates it before writing, and transactionally updates the existing
 `api.Region` and `api.Country` tables plus `GRCSourceRecord` metadata.
 
 It deliberately preserves upstream Country fields that Gold version 1 does not
-own. It uses `gocountryid` and `goregionid` as the existing GO primary keys,
-uses `gocountryid` as the stable publication-metadata identity,
+own. It uses `grc_source_id` as the stable Gold identity. An optional
+`gocountryid` preserves the original target for a GO-sourced row; a GRC-only row
+receives a normal GO integer ID and retains it through `GRCSourceRecord`.
+It uses `goregionid` for the existing Region primary key,
 maps inactive Gold rows to GO's `is_deprecated`, distinguishes that from a Gold
 soft delete, resolves sovereign-country links in a second pass, and rejects
 unknown GO enum values, duplicate identifiers, invalid geometry, conflicting
 Region values, and unresolved sovereign keys.
 
-The publisher requires a complete snapshot because dimension CDC remains an
-open DWH question. It receives records from its caller; it does not connect to
-Gold or schedule itself. It rejects timezone-naive source timestamps; the
-approved Gold interface must expose consumed timestamps as `timestamptz`
-rather than asking the adapter to assume UTC or local time.
+The publisher receives a complete snapshot and computes deterministic content
+hashes every two hours. It does not connect to Gold or schedule itself. It
+rejects timezone-naive source timestamps; existing naive DWH values are
+explicitly interpreted as Berlin local time and exposed as `timestamptz`.
 
 The function returns per-batch counters; the future orchestration layer owns
 aggregating them into `GRCSyncRun` and advancing `GRCReadModelState` only after
@@ -57,9 +58,10 @@ all dependency-safe publishers succeed.
 ## District/ADM1 projection
 
 `grc_district_projection.py` publishes only explicitly mapped ADM1
-`dimlocation` rows into the existing `api.District` table. Gold must provide the
-stable upstream `godistrictid`; the DWH `locationkey` cannot replace it because
-the existing map boundary layer and API relations use GO District IDs.
+`dimlocation` rows into the existing `api.District` table. Gold provides an
+immutable `grc_source_id`; optional `godistrictid` preserves an original GO
+target while GRC-only ADM1 rows receive a stable allocated GO integer target.
+The DWH `locationkey` remains a relationship surrogate, not cross-load identity.
 
 The adapter requires Country publication to complete first, validates GO's
 shorter name/code limits and the ADM1 level, derives the centroid from Gold
@@ -88,15 +90,16 @@ The primary `factproject.sectorkey` must occur exactly once in the bridge and is
 excluded from GO's secondary tags; every other bridge row must resolve through
 an explicit GO `SectorTag` ID. `factproject.organizationkey` is the reporting
 National Society organization and resolves to its GO Country through
-`dimorganization.countrykey` and `dimcountry.gocountryid`.
+`dimorganization.countrykey`, `dimcountry.grc_source_id`, and the publication mapping.
 
 ## Project publication
 
 `grc_project_projection.py` publishes the approved Gold Project fields into the
 existing `deployments.Project` table. It preserves the current Project API,
 filters, serializer and frontend contracts. It resolves Country, reporting NS,
-District, Event, DisasterType, primary Sector and secondary SectorTag only by
-explicit GO IDs, rejects missing dependencies and cross-country Districts, and
+District and Event relationships through published Gold UUID mappings, while
+DisasterType, primary Sector and secondary SectorTag remain exact GO-controlled
+IDs. It rejects missing dependencies and cross-country Districts, and
 sets internal `MEMBERSHIP` visibility.
 
 The publisher maps the overall budget and target/reached totals, deliberately
@@ -116,8 +119,9 @@ one outer transaction, leaving the prior cache and watermark intact on failure.
 ## Disaster Event projection
 
 `grc_event_projection.py` validates existing GO DisasterType IDs and publishes
-active `dimdisasterevent` records into `api.Event`. It requires explicit stable
-GO Event and DisasterType IDs, complete Event country and ADM1 collections, an
+active `dimdisasterevent` records into `api.Event`. It requires an immutable
+Gold Event UUID, an optional original GO Event ID, an exact GO DisasterType ID,
+complete Event country and ADM1 UUID collections, an
 authoritative Event title and start timestamp, and exact GO severity values.
 
 Countries, Districts, and their Regions must already be projected. The adapter
@@ -219,15 +223,15 @@ rows, relationships and fact tombstones in another read-only repeatable-read
 snapshot. It enforces the approved all-sector bridge rule, accepts non-ADM1
 location rows without projecting them, rejects missing/ambiguous/duplicate
 location relationships, and requires at most one primary Operation whose Event
-and DisasterType resolve to explicit GO IDs.
+through UUID publication mappings and whose DisasterType resolves to an exact GO ID.
 
 Before extraction, `grc_dwh_contract.py` can inspect the configured Gold
 database's `information_schema` without writing to Gold or GO. It validates the
 tables, columns, character capacity, and timezone-aware timestamp types used by
 the implemented reference and Project readers. The companion
 `docs/grc_gold_contract_additions.sql` is a DWH-team review template, not an
-application migration; in particular it refuses to guess the timezone of
-existing naive fact timestamps.
+application migration. Its reviewed conversion interprets existing naive fact
+timestamps as Berlin local time (`Europe/Berlin`; Microsoft `W. Europe Standard Time`).
 
 Run the read-only preflight with either or both scopes:
 

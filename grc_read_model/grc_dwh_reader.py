@@ -121,57 +121,67 @@ def _fetch_rows(cursor, query: str) -> list[dict[str, object]]:
 
 
 def _validate_event_geography(row: Mapping[str, object]) -> None:
-    event_id = row.get("goeventid")
+    event_id = row.get("grc_source_id")
     if row.get("unmappedcountrycount") != 0:
-        raise GRCDWHReadError(f"GO Event {event_id} has a country bridge without a mapped gocountryid")
-    if row.get("unmappeddistrictcount") != 0:
-        raise GRCDWHReadError(f"GO Event {event_id} has an ADM1 location without a mapped godistrictid")
-    if row.get("missinglocationcount") != 0:
-        raise GRCDWHReadError(f"GO Event {event_id} has a location bridge without a dimlocation row")
-    if row.get("unknownadminlevelcount") != 0:
-        raise GRCDWHReadError(f"GO Event {event_id} has a location without an adminlevel")
-    if row.get("duplicatelocationcount") != 0:
-        raise GRCDWHReadError(f"GO Event {event_id} has a duplicate location bridge")
-    if row.get("bridgeprimarycount") != 1:
-        raise GRCDWHReadError(f"GO Event {event_id} must have exactly one primary country bridge")
-    if row.get("primarygocountryid") is None:
-        raise GRCDWHReadError(f"GO Event {event_id} primarycountrykey must resolve to a mapped gocountryid")
-    if row.get("bridgeprimarygocountryid") != row.get("primarygocountryid"):
         raise GRCDWHReadError(
-            f"GO Event {event_id} primary country bridge does not match dimdisasterevent.primarycountrykey"
+            f"Gold Event {event_id} has a country bridge without a grc_source_id"
         )
-    if not row.get("gocountryids"):
-        raise GRCDWHReadError(f"GO Event {event_id} must have at least one mapped country bridge")
+    if row.get("unmappeddistrictcount") != 0:
+        raise GRCDWHReadError(
+            f"Gold Event {event_id} has an ADM1 location without a grc_source_id"
+        )
+    if row.get("missinglocationcount") != 0:
+        raise GRCDWHReadError(f"Gold Event {event_id} has a location bridge without a dimlocation row")
+    if row.get("unknownadminlevelcount") != 0:
+        raise GRCDWHReadError(f"Gold Event {event_id} has a location without an adminlevel")
+    if row.get("duplicatelocationcount") != 0:
+        raise GRCDWHReadError(f"Gold Event {event_id} has a duplicate location bridge")
+    if row.get("bridgeprimarycount") != 1:
+        raise GRCDWHReadError(f"Gold Event {event_id} must have exactly one primary country bridge")
+    if row.get("primarycountrygrcsourceid") is None:
+        raise GRCDWHReadError(
+            f"Gold Event {event_id} primarycountrykey must resolve to a country grc_source_id"
+        )
+    if row.get("bridgeprimarycountrygrcsourceid") != row.get("primarycountrygrcsourceid"):
+        raise GRCDWHReadError(
+            f"Gold Event {event_id} primary country bridge does not match "
+            "dimdisasterevent.primarycountrykey"
+        )
+    if not row.get("country_grc_source_ids"):
+        raise GRCDWHReadError(f"Gold Event {event_id} must have at least one country bridge")
 
 
 def _country_query(schema: str) -> str:
     table = _qualified_table(schema, "dimcountry")
     return f"""
         SELECT
-            countrykey,
-            gocountryid,
-            goregionid,
-            goregionnameid,
-            gorecordtypeid,
-            name,
-            iso2,
-            iso3,
-            region,
-            independentflag,
-            isactive,
-            societyname,
-            sovereigncountrykey,
-            centroidlatitude,
-            centroidlongitude,
-            bboxwest,
-            bboxsouth,
-            bboxeast,
-            bboxnorth,
-            sourceupdatedat,
-            ingestedat
-        FROM {table}
-        WHERE gocountryid IS NOT NULL
-        ORDER BY gocountryid
+            country.grc_source_id,
+            country.countrykey,
+            country.gocountryid,
+            country.goregionid,
+            country.goregionnameid,
+            country.gorecordtypeid,
+            country.name,
+            country.iso2,
+            country.iso3,
+            country.region,
+            country.independentflag,
+            country.isactive,
+            country.societyname,
+            country.sovereigncountrykey,
+            sovereign.grc_source_id AS sovereign_country_grc_source_id,
+            country.centroidlatitude,
+            country.centroidlongitude,
+            country.bboxwest,
+            country.bboxsouth,
+            country.bboxeast,
+            country.bboxnorth,
+            country.sourceupdatedat,
+            country.ingestedat
+        FROM {table} AS country
+        LEFT JOIN {table} AS sovereign
+            ON sovereign.countrykey = country.sovereigncountrykey
+        ORDER BY country.grc_source_id
     """
 
 
@@ -180,9 +190,10 @@ def _district_query(schema: str) -> str:
     countries = _qualified_table(schema, "dimcountry")
     return f"""
         SELECT
+            location.grc_source_id,
             location.locationkey,
             location.godistrictid,
-            country.gocountryid,
+            country.grc_source_id AS country_grc_source_id,
             location.countrykey,
             location.adminlevel,
             location.pcode,
@@ -194,8 +205,8 @@ def _district_query(schema: str) -> str:
             location.ingestedat
         FROM {locations} AS location
         LEFT JOIN {countries} AS country ON country.countrykey = location.countrykey
-        WHERE location.godistrictid IS NOT NULL
-        ORDER BY location.godistrictid
+        WHERE location.adminlevel = 1
+        ORDER BY location.grc_source_id
     """
 
 
@@ -218,6 +229,7 @@ def _event_query(schema: str) -> str:
     event_locations = _qualified_table(schema, "bridgedisastereventlocation")
     return f"""
         SELECT
+            event.grc_source_id,
             event.disastereventkey,
             event.goeventid,
             disaster_type.godisastertypeid,
@@ -228,14 +240,15 @@ def _event_query(schema: str) -> str:
             event.peopleaffected,
             event.goifrcseveritylevelid,
             event.ifrcseveritylevelupdatedat,
-            country_rows.gocountryids,
-            COALESCE(location_rows.godistrictids, ARRAY[]::integer[]) AS godistrictids,
+            country_rows.country_grc_source_ids,
+            COALESCE(location_rows.district_grc_source_ids, ARRAY[]::uuid[])
+                AS district_grc_source_ids,
             event.isactive,
             event.sourceupdatedat,
             event.ingestedat,
-            primary_country.gocountryid AS primarygocountryid,
+            primary_country.grc_source_id AS primarycountrygrcsourceid,
             country_rows.bridgeprimarycount,
-            country_rows.bridgeprimarygocountryid,
+            country_rows.bridgeprimarycountrygrcsourceid,
             country_rows.unmappedcountrycount,
             COALESCE(location_rows.unmappeddistrictcount, 0) AS unmappeddistrictcount,
             COALESCE(location_rows.missinglocationcount, 0) AS missinglocationcount,
@@ -249,23 +262,26 @@ def _event_query(schema: str) -> str:
             ON primary_country.countrykey = event.primarycountrykey
         JOIN LATERAL (
             SELECT
-                array_agg(country.gocountryid ORDER BY country.gocountryid)
-                    FILTER (WHERE country.gocountryid IS NOT NULL) AS gocountryids,
+                array_agg(country.grc_source_id ORDER BY country.grc_source_id)
+                    FILTER (WHERE country.grc_source_id IS NOT NULL)
+                    AS country_grc_source_ids,
                 count(*) FILTER (WHERE bridge.isprimary) AS bridgeprimarycount,
-                max(country.gocountryid) FILTER (WHERE bridge.isprimary)
-                    AS bridgeprimarygocountryid,
-                count(*) FILTER (WHERE country.gocountryid IS NULL) AS unmappedcountrycount
+                (array_agg(country.grc_source_id) FILTER (WHERE bridge.isprimary))[1]
+                    AS bridgeprimarycountrygrcsourceid,
+                count(*) FILTER (WHERE country.grc_source_id IS NULL) AS unmappedcountrycount
             FROM {event_countries} AS bridge
             LEFT JOIN {countries} AS country ON country.countrykey = bridge.countrykey
             WHERE bridge.disastereventkey = event.disastereventkey
         ) AS country_rows ON TRUE
         LEFT JOIN LATERAL (
             SELECT
-                array_agg(location.godistrictid ORDER BY location.godistrictid)
-                    FILTER (WHERE location.adminlevel = 1 AND location.godistrictid IS NOT NULL)
-                    AS godistrictids,
+                array_agg(location.grc_source_id ORDER BY location.grc_source_id)
+                    FILTER (
+                        WHERE location.adminlevel = 1
+                          AND location.grc_source_id IS NOT NULL
+                    ) AS district_grc_source_ids,
                 count(*) FILTER (
-                    WHERE location.adminlevel = 1 AND location.godistrictid IS NULL
+                    WHERE location.adminlevel = 1 AND location.grc_source_id IS NULL
                 ) AS unmappeddistrictcount,
                 count(*) FILTER (WHERE location.locationkey IS NULL) AS missinglocationcount,
                 count(*) FILTER (WHERE location.adminlevel <> 1) AS otheradminlevelcount,
@@ -278,8 +294,7 @@ def _event_query(schema: str) -> str:
             LEFT JOIN {locations} AS location ON location.locationkey = bridge.locationkey
             WHERE bridge.disastereventkey = event.disastereventkey
         ) AS location_rows ON TRUE
-        WHERE event.goeventid IS NOT NULL
-        ORDER BY event.goeventid
+        ORDER BY event.grc_source_id
     """
 
 

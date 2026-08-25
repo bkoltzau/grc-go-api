@@ -65,12 +65,15 @@ def _project_query(schema: str) -> str:
     disaster_types = _qualified_table(schema, "dimdisastertype")
     return f"""
         SELECT
+            project.grc_source_id,
             project.projectid,
+            project.goprojectid,
             project.projectname,
-            reporting_country.gocountryid AS goreportingnscountryid,
-            project_country.gocountryid AS goprojectcountryid,
-            COALESCE(location_rows.godistrictids, ARRAY[]::integer[]) AS godistrictids,
-            primary_operation.goeventid,
+            reporting_country.grc_source_id AS reporting_ns_country_grc_source_id,
+            project_country.grc_source_id AS project_country_grc_source_id,
+            COALESCE(location_rows.district_grc_source_ids, ARRAY[]::uuid[])
+                AS district_grc_source_ids,
+            primary_operation.event_grc_source_id,
             primary_operation.godisastertypeid,
             primary_sector.goprojectprimarysectorid,
             COALESCE(sector_rows.goprojectsecondarysectortagids, ARRAY[]::integer[])
@@ -129,11 +132,13 @@ def _project_query(schema: str) -> str:
         ) AS sector_rows ON TRUE
         LEFT JOIN LATERAL (
             SELECT
-                array_agg(location.godistrictid ORDER BY location.godistrictid)
-                    FILTER (WHERE location.adminlevel = 1 AND location.godistrictid IS NOT NULL)
-                    AS godistrictids,
+                array_agg(location.grc_source_id ORDER BY location.grc_source_id)
+                    FILTER (
+                        WHERE location.adminlevel = 1
+                          AND location.grc_source_id IS NOT NULL
+                    ) AS district_grc_source_ids,
                 count(*) FILTER (
-                    WHERE location.adminlevel = 1 AND location.godistrictid IS NULL
+                    WHERE location.adminlevel = 1 AND location.grc_source_id IS NULL
                 ) AS unmappeddistrictcount,
                 count(*) FILTER (WHERE location.locationkey IS NULL)
                     AS missinglocationcount,
@@ -150,10 +155,10 @@ def _project_query(schema: str) -> str:
         ) AS location_rows ON TRUE
         LEFT JOIN LATERAL (
             SELECT
-                max(event.goeventid) AS goeventid,
+                (array_agg(event.grc_source_id))[1] AS event_grc_source_id,
                 max(disaster_type.godisastertypeid) AS godisastertypeid,
                 count(*) AS primaryoperationcount,
-                count(*) FILTER (WHERE event.goeventid IS NULL) AS unmappedeventcount,
+                count(*) FILTER (WHERE event.grc_source_id IS NULL) AS unmappedeventcount,
                 count(*) FILTER (WHERE disaster_type.godisastertypeid IS NULL)
                     AS unmappeddisastertypecount
             FROM {project_operations} AS bridge
@@ -167,17 +172,17 @@ def _project_query(schema: str) -> str:
               AND bridge.isprimary IS TRUE
         ) AS primary_operation ON TRUE
         WHERE NOT project.isdeleted
-        ORDER BY project.projectid
+        ORDER BY project.grc_source_id
     """
 
 
 def _project_deletion_query(schema: str) -> str:
     projects = _qualified_table(schema, "factproject")
     return f"""
-        SELECT projectid, ingestedat
+        SELECT grc_source_id, projectid, goprojectid, ingestedat
         FROM {projects}
         WHERE isdeleted
-        ORDER BY projectid
+        ORDER BY grc_source_id
     """
 
 
@@ -192,7 +197,9 @@ def _validate_project_relationships(row: Mapping[str, object]) -> None:
             f"Gold Project {project_id} has a non-primary sector without a GO secondary SectorTag mapping"
         )
     if row.get("unmappeddistrictcount") != 0:
-        raise GRCDWHReadError(f"Gold Project {project_id} has an ADM1 location without a mapped godistrictid")
+        raise GRCDWHReadError(
+            f"Gold Project {project_id} has an ADM1 location without a grc_source_id"
+        )
     if row.get("missinglocationcount") != 0:
         raise GRCDWHReadError(f"Gold Project {project_id} has a location bridge without a dimlocation row")
     if row.get("unknownadminlevelcount") != 0:
@@ -202,7 +209,9 @@ def _validate_project_relationships(row: Mapping[str, object]) -> None:
     if row.get("primaryoperationcount") not in (0, 1):
         raise GRCDWHReadError(f"Gold Project {project_id} must have at most one primary Operation")
     if row.get("primaryoperationcount") == 1 and row.get("unmappedeventcount") != 0:
-        raise GRCDWHReadError(f"Gold Project {project_id} primary Operation must resolve to a mapped GO Event")
+        raise GRCDWHReadError(
+            f"Gold Project {project_id} primary Operation must resolve to an Event grc_source_id"
+        )
     if row.get("primaryoperationcount") == 1 and row.get("unmappeddisastertypecount") != 0:
         raise GRCDWHReadError(
             f"Gold Project {project_id} primary Operation must resolve to a mapped GO DisasterType"

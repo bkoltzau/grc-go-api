@@ -1,6 +1,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 
 from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase
@@ -14,8 +15,13 @@ from grc_read_model.grc_country_projection import (
 from grc_read_model.models import GRCEntityType, GRCSourceRecord, GRCSyncRun
 
 
+COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000001")
+TERRITORY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000002")
+
+
 def country_row(**overrides):
     row = {
+        "grc_source_id": COUNTRY_SOURCE_ID,
         "countrykey": 10,
         "gocountryid": 276,
         "goregionid": 3,
@@ -28,6 +34,7 @@ def country_row(**overrides):
         "isactive": True,
         "independentflag": True,
         "sovereigncountrykey": None,
+        "sovereign_country_grc_source_id": None,
         "societyname": "German Red Cross",
         "centroidlatitude": Decimal("51.165691"),
         "centroidlongitude": Decimal("10.451526"),
@@ -62,6 +69,8 @@ class GRCGoldCountryTest(SimpleTestCase):
         first = GRCGoldCountry.from_gold_row(country_row())
         changed_ingestion = GRCGoldCountry.from_gold_row(
             country_row(
+                countrykey=99,
+                gocountryid=None,
                 sourceupdatedat=datetime(2026, 8, 3, tzinfo=timezone.utc),
                 ingestedat=datetime(2026, 8, 4, tzinfo=timezone.utc),
             )
@@ -113,7 +122,7 @@ class GRCCountryPublisherTest(TestCase):
         source_record = GRCSourceRecord.objects.get(
             source_system="grc_gold",
             entity_type=GRCEntityType.COUNTRY,
-            source_id="276",
+            source_id=str(COUNTRY_SOURCE_ID),
         )
         self.assertEqual(source_record.target_object, country)
         self.assertEqual(source_record.source_ingested_at, germany.ingested_at)
@@ -136,6 +145,7 @@ class GRCCountryPublisherTest(TestCase):
         self.assertEqual(first_result.rows_created, 0)
         self.assertEqual(second_result.rows_created, 0)
         self.assertEqual(second_result.rows_updated, 1)
+        self.assertEqual(second_result.rows_unchanged, 1)
         self.assertEqual(Country.objects.count(), 1)
         country = Country.objects.get(pk=276)
         self.assertEqual(country.name, "Germany")
@@ -148,12 +158,14 @@ class GRCCountryPublisherTest(TestCase):
         territory_row.update(
             {
                 "countrykey": 11,
+                "grc_source_id": TERRITORY_SOURCE_ID,
                 "gocountryid": 999,
                 "name": "Example Territory",
                 "iso2": "XT",
                 "iso3": "XTR",
                 "independentflag": False,
                 "sovereigncountrykey": 10,
+                "sovereign_country_grc_source_id": COUNTRY_SOURCE_ID,
             }
         )
         territory = GRCGoldCountry.from_gold_row(territory_row)
@@ -169,7 +181,9 @@ class GRCCountryPublisherTest(TestCase):
 
         self.assertEqual(result.rows_deprecated, 1)
         self.assertTrue(Country.objects.get(pk=276).is_deprecated)
-        self.assertFalse(GRCSourceRecord.objects.get(source_id="276").is_deleted)
+        self.assertFalse(
+            GRCSourceRecord.objects.get(source_id=str(COUNTRY_SOURCE_ID)).is_deleted
+        )
 
     def test_rejects_an_incomplete_or_ambiguous_snapshot_before_writing(self):
         valid = GRCGoldCountry.from_gold_row(country_row())
@@ -177,7 +191,7 @@ class GRCCountryPublisherTest(TestCase):
             country_row(sovereigncountrykey=999)
         )
         duplicate = GRCGoldCountry.from_gold_row(
-            country_row(countrykey=11)
+            country_row(countrykey=11, grc_source_id=TERRITORY_SOURCE_ID)
         )
 
         for records in ([unresolved], [valid, duplicate]):
@@ -213,3 +227,20 @@ class GRCCountryPublisherTest(TestCase):
             publish_grc_country_snapshot([record], self.sync_run)
 
         self.assertFalse(Country.objects.exists())
+
+    def test_allocates_and_retains_a_go_id_for_a_grc_only_country(self):
+        record = GRCGoldCountry.from_gold_row(country_row(gocountryid=None))
+
+        first = publish_grc_country_snapshot([record], self.sync_run)
+        allocated_id = GRCSourceRecord.objects.get(
+            source_id=str(COUNTRY_SOURCE_ID)
+        ).target_object_id
+        second = publish_grc_country_snapshot([record], self.sync_run)
+
+        self.assertEqual(first.rows_created, 1)
+        self.assertEqual(second.rows_created, 0)
+        self.assertEqual(Country.objects.count(), 1)
+        self.assertEqual(
+            GRCSourceRecord.objects.get(source_id=str(COUNTRY_SOURCE_ID)).target_object_id,
+            allocated_id,
+        )

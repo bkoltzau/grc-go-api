@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 
 from django.test import SimpleTestCase, TestCase
 
@@ -8,6 +9,7 @@ from api.factories.disaster_type import DisasterTypeFactory
 from api.factories.district import DistrictFactory
 from api.factories.event import EventFactory
 from deployments.models import AnnualSplit, OperationTypes, ProgrammeTypes, Project, Sector, SectorTag, Statuses
+from grc_read_model.grc_identity import publish_grc_source_record
 from grc_read_model.grc_project_projection import (
     GRCGoldProject,
     GRCGoldProjectDeletion,
@@ -17,14 +19,24 @@ from grc_read_model.grc_project_projection import (
 from grc_read_model.models import GRCEntityType, GRCSourceRecord, GRCSyncRun
 
 
+COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000001")
+MISSING_COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000099")
+DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000001")
+EVENT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
+PROJECT_SOURCE_ID = UUID("40000000-0000-0000-0000-000000000001")
+UNKNOWN_PROJECT_SOURCE_ID = UUID("40000000-0000-0000-0000-000000000099")
+
+
 def project_row(**overrides):
     row = {
+        "grc_source_id": PROJECT_SOURCE_ID,
         "projectid": 7001,
+        "goprojectid": 7001,
         "projectname": "Flood recovery",
-        "goreportingnscountryid": 276,
-        "goprojectcountryid": 276,
-        "godistrictids": [1001],
-        "goeventid": 3001,
+        "reporting_ns_country_grc_source_id": COUNTRY_SOURCE_ID,
+        "project_country_grc_source_id": COUNTRY_SOURCE_ID,
+        "district_grc_source_ids": [DISTRICT_SOURCE_ID],
+        "event_grc_source_id": EVENT_SOURCE_ID,
         "godisastertypeid": 5,
         "goprojectprimarysectorid": 0,
         "goprojectsecondarysectortagids": [1],
@@ -49,19 +61,20 @@ class GRCGoldProjectTest(SimpleTestCase):
     def test_maps_approved_gold_contract_without_guessing(self):
         project = GRCGoldProject.from_gold_row(project_row())
 
-        self.assertEqual(project.project_id, 7001)
+        self.assertEqual(project.project_key, 7001)
+        self.assertEqual(project.source_id, PROJECT_SOURCE_ID)
         self.assertEqual(project.budget_amount, 250000)
-        self.assertEqual(project.district_ids, (1001,))
+        self.assertEqual(project.district_source_ids, (DISTRICT_SOURCE_ID,))
         self.assertEqual(project.secondary_sector_tag_ids, (1,))
-        self.assertEqual(project.reporting_ns_country_id, 276)
+        self.assertEqual(project.reporting_ns_country_source_id, COUNTRY_SOURCE_ID)
 
     def test_rejects_lossy_or_semantically_incomplete_values(self):
         invalid_rows = (
             project_row(projectname=""),
             project_row(budgetamountchf=Decimal("10.50")),
             project_row(ingestedat=datetime(2026, 8, 21, 8, 0)),
-            project_row(godistrictids=[1001, 1001]),
-            project_row(goeventid=3001, godisastertypeid=None),
+            project_row(district_grc_source_ids=[DISTRICT_SOURCE_ID, DISTRICT_SOURCE_ID]),
+            project_row(event_grc_source_id=EVENT_SOURCE_ID, godisastertypeid=None),
             project_row(peopletargeted=-1),
         )
         for row in invalid_rows:
@@ -72,7 +85,7 @@ class GRCGoldProjectTest(SimpleTestCase):
         with self.assertRaisesRegex(GRCProjectProjectionError, "requires a primary Operation"):
             GRCGoldProject.from_gold_row(
                 project_row(
-                    goeventid=None,
+                    event_grc_source_id=None,
                     godisastertypeid=None,
                     goprojectprogrammetypeid=ProgrammeTypes.MULTILATERAL,
                     goprojectoperationtypeid=OperationTypes.EMERGENCY_OPERATION,
@@ -89,6 +102,22 @@ class GRCProjectPublicationTest(TestCase):
         Sector.objects.create(pk=0, title="WASH")
         SectorTag.objects.create(pk=1, title="Health")
         self.sync_run = GRCSyncRun.objects.create(pipeline="test_project")
+        for entity_type, source_id, model, target_id in (
+            (GRCEntityType.COUNTRY, COUNTRY_SOURCE_ID, type(self.country), self.country.pk),
+            (GRCEntityType.DISTRICT, DISTRICT_SOURCE_ID, type(self.district), self.district.pk),
+            (GRCEntityType.DISASTER_EVENT, EVENT_SOURCE_ID, type(self.event), self.event.pk),
+        ):
+            publish_grc_source_record(
+                source_system="grc_gold",
+                entity_type=entity_type,
+                source_id=source_id,
+                target_model=model,
+                target_object_id=target_id,
+                source_ingested_at=None,
+                content_hash="a" * 64,
+                is_deleted=False,
+                sync_run=self.sync_run,
+            )
 
     def test_publishes_existing_go_project_contract_and_metadata(self):
         record = GRCGoldProject.from_gold_row(project_row())
@@ -117,16 +146,18 @@ class GRCProjectPublicationTest(TestCase):
 
         source_record = GRCSourceRecord.objects.get(
             entity_type=GRCEntityType.PROJECT,
-            source_id="7001",
+            source_id=str(PROJECT_SOURCE_ID),
         )
         self.assertFalse(source_record.is_deleted)
         self.assertEqual(source_record.target_object_id, 7001)
         self.assertEqual(source_record.content_hash, record.content_hash())
 
     def test_rolls_back_when_dependency_is_not_projected(self):
-        record = GRCGoldProject.from_gold_row(project_row(goprojectcountryid=999))
+        record = GRCGoldProject.from_gold_row(
+            project_row(project_country_grc_source_id=MISSING_COUNTRY_SOURCE_ID)
+        )
 
-        with self.assertRaisesRegex(GRCProjectProjectionError, "Country projection must run first"):
+        with self.assertRaisesRegex(ValueError, "missing published country source GUID"):
             publish_grc_project_records(
                 [record],
                 [],
@@ -165,7 +196,9 @@ class GRCProjectPublicationTest(TestCase):
         )
         deletion = GRCGoldProjectDeletion.from_gold_row(
             {
+                "grc_source_id": PROJECT_SOURCE_ID,
                 "projectid": 7001,
+                "goprojectid": 7001,
                 "ingestedat": datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc),
             }
         )
@@ -187,6 +220,41 @@ class GRCProjectPublicationTest(TestCase):
         self.assertFalse(Project.objects.filter(pk=7001).exists())
         source_record = GRCSourceRecord.objects.get(
             entity_type=GRCEntityType.PROJECT,
-            source_id="7001",
+            source_id=str(PROJECT_SOURCE_ID),
         )
         self.assertTrue(source_record.is_deleted)
+
+    def test_allocates_and_retains_a_go_id_for_a_grc_only_project(self):
+        record = GRCGoldProject.from_gold_row(project_row(goprojectid=None))
+
+        first = publish_grc_project_records(
+            [record], [], self.sync_run, as_of=date(2026, 8, 21)
+        )
+        mapping = GRCSourceRecord.objects.get(source_id=str(PROJECT_SOURCE_ID))
+        second = publish_grc_project_records(
+            [record], [], self.sync_run, as_of=date(2026, 8, 21)
+        )
+
+        self.assertEqual(first.rows_created, 1)
+        self.assertEqual(second.rows_created, 0)
+        self.assertEqual(second.rows_unchanged, 1)
+        self.assertTrue(Project.objects.filter(pk=mapping.target_object_id).exists())
+
+    def test_ignores_an_unpublished_grc_only_tombstone(self):
+        deletion = GRCGoldProjectDeletion.from_gold_row(
+            {
+                "grc_source_id": UNKNOWN_PROJECT_SOURCE_ID,
+                "projectid": 7999,
+                "goprojectid": None,
+                "ingestedat": datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc),
+            }
+        )
+
+        result = publish_grc_project_records(
+            [], [deletion], self.sync_run, as_of=date(2026, 8, 21)
+        )
+
+        self.assertEqual(result.rows_deleted, 0)
+        self.assertFalse(
+            GRCSourceRecord.objects.filter(source_id=str(UNKNOWN_PROJECT_SOURCE_ID)).exists()
+        )

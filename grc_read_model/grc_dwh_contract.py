@@ -50,6 +50,7 @@ def _column(
 
 GRC_GOLD_CONTRACT_REQUIREMENTS = (
     # Reference snapshot.
+    _column("reference", "dimcountry", "grc_source_id", "uuid"),
     _column("reference", "dimcountry", "countrykey", "integer"),
     _column("reference", "dimcountry", "gocountryid", "integer"),
     _column("reference", "dimcountry", "goregionid", "integer"),
@@ -78,6 +79,7 @@ GRC_GOLD_CONTRACT_REQUIREMENTS = (
     _column("reference", "dimcountry", "sourceupdatedat", "timestamp with time zone"),
     _column("reference", "dimcountry", "ingestedat", "timestamp with time zone"),
     _column("reference", "dimlocation", "locationkey", "integer"),
+    _column("reference", "dimlocation", "grc_source_id", "uuid"),
     _column("reference", "dimlocation", "godistrictid", "integer"),
     _column("reference", "dimlocation", "countrykey", "integer"),
     _column("reference", "dimlocation", "adminlevel", "smallint"),
@@ -94,6 +96,7 @@ GRC_GOLD_CONTRACT_REQUIREMENTS = (
     _column("reference", "dimdisastertype", "name", "character varying"),
     _column("reference", "dimdisastertype", "isactive", "boolean"),
     _column("reference", "dimdisasterevent", "disastereventkey", "integer"),
+    _column("reference", "dimdisasterevent", "grc_source_id", "uuid"),
     _column("reference", "dimdisasterevent", "goeventid", "integer"),
     _column("reference", "dimdisasterevent", "disastertypekey", "integer"),
     _column("reference", "dimdisasterevent", "primarycountrykey", "integer"),
@@ -119,6 +122,8 @@ GRC_GOLD_CONTRACT_REQUIREMENTS = (
     _column("reference", "bridgedisastereventlocation", "locationkey", "integer"),
     # Project snapshot and every directly queried dependency.
     _column("project", "factproject", "projectid", "integer"),
+    _column("project", "factproject", "grc_source_id", "uuid"),
+    _column("project", "factproject", "goprojectid", "integer"),
     _column(
         "project",
         "factproject",
@@ -142,7 +147,7 @@ GRC_GOLD_CONTRACT_REQUIREMENTS = (
     _column("project", "dimdate", "datekey", "integer"),
     _column("project", "dimdate", "date", "date"),
     _column("project", "dimcountry", "countrykey", "integer"),
-    _column("project", "dimcountry", "gocountryid", "integer"),
+    _column("project", "dimcountry", "grc_source_id", "uuid"),
     _column("project", "dimorganization", "organizationkey", "integer"),
     _column("project", "dimorganization", "countrykey", "integer"),
     _column("project", "dimsector", "sectorkey", "integer"),
@@ -153,8 +158,8 @@ GRC_GOLD_CONTRACT_REQUIREMENTS = (
     _column("project", "dimoperationstatus", "operationstatuskey", "integer"),
     _column("project", "dimoperationstatus", "goprojectstatusid", "smallint"),
     _column("project", "dimlocation", "locationkey", "integer"),
+    _column("project", "dimlocation", "grc_source_id", "uuid"),
     _column("project", "dimlocation", "adminlevel", "smallint"),
-    _column("project", "dimlocation", "godistrictid", "integer"),
     _column("project", "bridgeprojectsector", "projectid", "integer"),
     _column("project", "bridgeprojectsector", "sectorkey", "integer"),
     _column("project", "bridgeprojectlocation", "projectid", "integer"),
@@ -167,7 +172,7 @@ GRC_GOLD_CONTRACT_REQUIREMENTS = (
     _column("project", "factoperation", "disastertypekey", "integer"),
     _column("project", "factoperation", "isdeleted", "boolean"),
     _column("project", "dimdisasterevent", "disastereventkey", "integer"),
-    _column("project", "dimdisasterevent", "goeventid", "integer"),
+    _column("project", "dimdisasterevent", "grc_source_id", "uuid"),
     _column("project", "dimdisastertype", "disastertypekey", "integer"),
     _column("project", "dimdisastertype", "godisastertypeid", "integer"),
 )

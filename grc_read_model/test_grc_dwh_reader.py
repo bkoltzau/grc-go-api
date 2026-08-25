@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import UUID
 
 from django.test import SimpleTestCase
 from psycopg2 import extensions
@@ -12,6 +13,11 @@ from grc_read_model.grc_dwh_reader import (
     GRCDWHSettings,
     load_grc_reference_snapshot,
 )
+
+
+COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000001")
+DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000001")
+EVENT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
 
 
 def dwh_environment(**overrides):
@@ -31,6 +37,7 @@ def reference_rows(watermark=None):
         "SELECT CURRENT_TIMESTAMP": [{"watermark": watermark}],
         'FROM "public"."dimcountry"': [
             {
+                "grc_source_id": COUNTRY_SOURCE_ID,
                 "countrykey": 10,
                 "gocountryid": 276,
                 "goregionid": 3,
@@ -44,6 +51,7 @@ def reference_rows(watermark=None):
                 "isactive": True,
                 "societyname": "German Red Cross",
                 "sovereigncountrykey": None,
+                "sovereign_country_grc_source_id": None,
                 "centroidlatitude": Decimal("51.165691"),
                 "centroidlongitude": Decimal("10.451526"),
                 "bboxwest": Decimal("5.866316"),
@@ -56,9 +64,10 @@ def reference_rows(watermark=None):
         ],
         'FROM "public"."dimlocation"': [
             {
+                "grc_source_id": DISTRICT_SOURCE_ID,
                 "locationkey": 101,
                 "godistrictid": 1001,
-                "gocountryid": 276,
+                "country_grc_source_id": COUNTRY_SOURCE_ID,
                 "countrykey": 10,
                 "adminlevel": 1,
                 "pcode": "DE-BY",
@@ -81,6 +90,7 @@ def reference_rows(watermark=None):
         ],
         'FROM "public"."dimdisasterevent"': [
             {
+                "grc_source_id": EVENT_SOURCE_ID,
                 "disastereventkey": 30,
                 "goeventid": 3001,
                 "godisastertypeid": 5,
@@ -91,14 +101,14 @@ def reference_rows(watermark=None):
                 "peopleaffected": 1000,
                 "goifrcseveritylevelid": AlertLevel.ORANGE,
                 "ifrcseveritylevelupdatedat": datetime(2026, 6, 2, tzinfo=timezone.utc),
-                "gocountryids": [276],
-                "godistrictids": [1001],
+                "country_grc_source_ids": [COUNTRY_SOURCE_ID],
+                "district_grc_source_ids": [DISTRICT_SOURCE_ID],
                 "isactive": True,
                 "sourceupdatedat": datetime(2026, 8, 19, tzinfo=timezone.utc),
                 "ingestedat": watermark,
-                "primarygocountryid": 276,
+                "primarycountrygrcsourceid": COUNTRY_SOURCE_ID,
                 "bridgeprimarycount": 1,
-                "bridgeprimarygocountryid": 276,
+                "bridgeprimarycountrygrcsourceid": COUNTRY_SOURCE_ID,
                 "unmappedcountrycount": 0,
                 "unmappeddistrictcount": 0,
                 "missinglocationcount": 0,
@@ -211,8 +221,8 @@ class GRCDWHReaderTest(SimpleTestCase):
         self.assertEqual(snapshot.districts[0].go_district_id, 1001)
         self.assertEqual(snapshot.disaster_types[0].go_disaster_type_id, 5)
         self.assertEqual(snapshot.events[0].go_event_id, 3001)
-        self.assertEqual(snapshot.events[0].go_country_ids, (276,))
-        self.assertEqual(snapshot.events[0].go_district_ids, (1001,))
+        self.assertEqual(snapshot.events[0].country_source_ids, (COUNTRY_SOURCE_ID,))
+        self.assertEqual(snapshot.events[0].district_source_ids, (DISTRICT_SOURCE_ID,))
         self.assertEqual(len(connection.queries), 5)
         self.assertIn('FROM "public"."dimcountry"', connection.queries[1])
         self.assertIn('FROM "public"."dimlocation"', connection.queries[2])
@@ -278,7 +288,7 @@ class GRCDWHReaderTest(SimpleTestCase):
         rows['FROM "public"."dimdisasterevent"'][0]["unmappedcountrycount"] = 1
         connection = FakeConnection(rows)
 
-        with self.assertRaisesRegex(GRCDWHReadError, "without a mapped gocountryid"):
+        with self.assertRaisesRegex(GRCDWHReadError, "without a grc_source_id"):
             load_grc_reference_snapshot(
                 GRCDWHSettings.from_env(dwh_environment()),
                 connection_factory=lambda **kwargs: connection,

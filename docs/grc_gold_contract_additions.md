@@ -1,6 +1,6 @@
 # GRC GO Gold-Layer Contract Additions
 
-Status: approved version-one contract input as of 2026-08-21; no database migration is implemented by this document.
+Status: approved version-one contract input as of 2026-08-25; no database migration is implemented by this document.
 
 The companion `docs/grc_gold_contract_additions.sql` is an additive PostgreSQL
 review template for the DWH team. GO never executes it. After the DWH-managed
@@ -14,19 +14,23 @@ preflight before either synchronization command.
 - Map `dimdisasterevent` to the GO Event/Emergency concept.
 - Map `factoperation` to the GO Appeal/Operation concept.
 - Funding is allocated to Projects, not directly to Operations.
-- Detailed funding/financial data is a later DWH phase. Until then, operation requested/funded amounts are documented debt and must not be populated with zeroes or guessed Project values.
+- Detailed funding/financial data is a later DWH phase. The existing GO Appeal model requires numeric requested/funded values, so version 1 may publish explicit `0.0` placeholders. They mean "not yet supplied", not measured zero funding, and must not feed financial aggregates.
 - Use the existing GO controlled values for Project/Activity indicators and disaggregation rather than inventing a GRC taxonomy.
 - Keep the existing GO Country experience. There is no requirement for a new Country list page.
 - Full Country NS/Profile/databank support is a version 2 capability.
 - GO Country/reference data will first be ingested into Gold, where minor GRC corrections may be applied, and GO will then read the projected values back from Gold.
 - The GO deployment is read-only for projected Country, Project, Operation, Activity, Funding, and Indicator records.
-- Dimension and bridge change tracking still needs to be verified. Until confirmed, the sync design must support full comparison/hash processing for those tables.
+- Synchronization formally uses a complete snapshot plus deterministic content-hash comparison every two hours. `ingestedat` remains audit/watermark metadata, not the only change detector.
 - English is the only required UI language.
 - SharePoint URLs and existing GO document metadata are sufficient for the initial document integration.
 - Gold relationships are resolved through declared key/FK relationships. Names and labels are never identity or join keys.
 - `bridgeprojectsector` is the complete Project-sector association set, including the primary sector.
 - `factproject.organizationkey` identifies the reporting National Society organization and `factactivity.organizationkey` identifies the Activity lead organization.
-- `dimlocation` contains multiple administrative levels. Only explicitly mapped ADM1 rows are projected to GO `District` in version 1; other levels remain valid Gold records.
+- `dimlocation.adminlevel = 1` means ADM1 and `adminlevel = 2` means ADM2. Deeper numeric levels are valid; version 1 projects only ADM1 to GO `District`.
+- Publish every valid non-deleted Project and every valid in-scope Country/Event/reference row; there is no additional programme, country, source-system, or organization filter in version 1.
+- Every Gold entity receives a DWH-owned immutable `grc_source_id` UUID. Existing GO IDs are optional target hints for GO-sourced rows; they are not Gold identity and are absent for GRC-only records.
+- Every consumed bridge is a complete association snapshot. A relationship absent from the next successful snapshot is removed from the GO cache. Duplicate or null bridge endpoints are invalid.
+- Existing naive timestamps are Berlin local civil time. Use Windows `W. Europe Standard Time` in Microsoft systems and IANA `Europe/Berlin` in PostgreSQL.
 
 ## 2. Historical Project UI contract
 
@@ -82,7 +86,8 @@ GO reference data should be ingested into `dimcountry`, then exposed back to GO 
 
 | Logical field | Suggested type | Required | Meaning and rule |
 |---|---|---:|---|
-| `gocountryid` | integer | Yes | Stable upstream GO Country ID. Must be unique for GO-sourced country records. |
+| `grc_source_id` | uuid | Yes | DWH-owned immutable Country identity. Unique and never regenerated during reloads. |
+| `gocountryid` | integer, nullable | Conditional | Original GO Country ID for GO-sourced rows. Null for GRC-only rows; the publisher allocates and remembers a GO integer target. |
 | `goregionid` | integer | Yes | Stable upstream GO Region ID used by Country routes, filters, and breadcrumbs. |
 | `goregionnameid` | smallint | Yes | Exact upstream `Region.name` enum value (currently 0-4). This is distinct from the Region database ID and avoids deriving the enum from a translated label. |
 | `gorecordtypeid` | smallint | Yes | Exact upstream `Country.record_type` enum value (currently 1-5). Copy the GO value rather than introducing a textual mapping. |
@@ -107,7 +112,8 @@ values remain in Gold and must not be coerced into District records.
 
 | Logical field | Suggested type | Required | Meaning and rule |
 |---|---|---:|---|
-| `godistrictid` | integer, nullable | Yes for mapped ADM1 | Stable upstream GO District ID. It must be unique for GO-mapped ADM1 rows. `locationkey` cannot replace it because GO map boundaries and API relations use the GO ID. |
+| `grc_source_id` | uuid | Yes | DWH-owned immutable location identity, including ADM1, ADM2, and deeper rows. |
+| `godistrictid` | integer, nullable | Conditional | Original GO District ID for GO-sourced ADM1 rows. Null for GRC-only ADM1 rows; the publisher allocates and remembers a GO integer target. |
 | `sourceupdatedat` | timestamptz, nullable | Recommended | Last modification timestamp reported by GO for the location record. |
 | `ingestedat` | timestamptz, nullable | Recommended | Gold ingestion timestamp for location synchronization. |
 
@@ -115,8 +121,8 @@ For mapped ADM1 rows, existing `pcode` is the GO District `code` and is required
 to be non-empty and no longer than the upstream 10-character limit. Existing
 `name` must fit GO's 100-character District limit. Existing `latitude` and
 `longitude` are required because the Country Project map plots Project counts at
-the District centroid. `countrykey` is joined to `dimcountry.gocountryid` before
-publication.
+the District centroid. `countrykey` is joined to `dimcountry.grc_source_id`,
+then the publisher resolves that UUID to the corresponding GO Country row.
 
 No District bbox field is required for version 1: the restored page uses the
 Country bbox for viewport bounds, Gold latitude/longitude for Project markers,
@@ -146,7 +152,8 @@ the existing GO controlled values.
 
 | Logical field | Suggested type | Required | Meaning and rule |
 |---|---|---:|---|
-| `goeventid` | integer, nullable | Yes for mapped Events | Stable existing GO Event ID used by Project/Operation links and frontend routes. |
+| `grc_source_id` | uuid | Yes | DWH-owned immutable Event identity. |
+| `goeventid` | integer, nullable | Conditional | Original GO Event ID when the Event came from GO. Null for GRC-only Events; the publisher allocates and remembers a GO integer target used by frontend routes. |
 | `disasterstartat` | timestamptz, nullable | Yes for mapped Events | Original GO Event start timestamp. `startdatekey` remains the analytical date but cannot preserve the required timestamp alone. |
 | `peopleaffected` | integer, nullable | Optional | Event-level affected-person count exposed as GO `num_affected`. Do not substitute Operation targeted/reached values. |
 | `goifrcseveritylevelid` | smallint, nullable | Yes for mapped Events | Exact upstream GO `AlertLevel` value (currently 0-2). Zero is a valid value. |
@@ -193,6 +200,8 @@ without corrupting the last valid read model.
 
 | Logical field | Suggested type | Required | Meaning and rule |
 |---|---|---:|---|
+| `grc_source_id` | uuid | Yes | DWH-owned immutable Project identity. |
+| `goprojectid` | integer, nullable | Conditional | Original GO Project ID for GO-sourced rows. Null for GRC-only Projects; the publisher allocates and remembers a GO target ID. |
 | `projectname` | varchar(500) | Yes | Authoritative Project title shown on Project list/detail pages. Must not be derived from sector, organization, operation, or source-system name. |
 | `goprojectprogrammetypeid` | smallint | Yes | Exact upstream GO `ProgrammeTypes` integer value used to populate `programme_type` (currently 0-2). Do not map translated labels. |
 | `goprojectoperationtypeid` | smallint | Yes | Exact upstream GO `OperationTypes` integer value used to populate `operation_type` (currently 0-1). This is separate from disaster type and operation status. |
@@ -217,10 +226,9 @@ Project `modified_at` can be derived from the latest `ingestedat`. `modified_by`
 
 Annual splits are optional in the historical detail UI. Gold can initially use overall `budgetamountchf`, `peopletargeted`, and `peoplereached`; no annual-split structure is required for version 1.
 
-For GO-sourced rows, existing `projectid` is the stable upstream GO Project ID
-and must retain that meaning after Gold correction and republishing. If another
-source is added later, its identifier must not be placed in `projectid` unless
-the DWH first assigns a collision-free persistent GO target identity.
+`projectid` remains the DWH surrogate/key used by existing fact and bridge
+relationships. It is not assumed to be a GO ID. Cross-load identity is
+`grc_source_id`; `goprojectid` carries the optional original GO identity.
 
 ### 3.3.1 `dimsector` GO Project identities
 
@@ -266,13 +274,21 @@ silently prefer either value.
 
 | Logical field | Suggested type | Required | Meaning and rule |
 |---|---|---:|---|
+| `grc_source_id` | uuid | Yes | DWH-owned immutable Operation identity. |
+| `goappealid` | integer, nullable | Conditional | Original GO Appeal ID for GO-sourced Operations. Null for GRC-only Operations; the publisher allocates and remembers the GO target ID. |
+| `goappealtypeid` | smallint, nullable | Yes before publication | Exact existing GO `AppealType` value. Gold backfills it from the GO source when available and explicitly assigns it for GRC-only Operations. Do not match type names in the adapter. |
 | `operationname` | varchar(500) | Yes | Authoritative Operation/Appeal title. It is not the Disaster Event name. |
 | `operationcode` | varchar(50) | Yes | Stable human-readable operational code used by GO tables and document references. |
 | `operationtypecode` | varchar(50) | Yes | Controlled operation/appeal type. It is separate from disaster type and operation status. |
 
 The existing `disastereventkey` links the Operation to the GO Event/Emergency projection. Existing start/end dates, country, disaster type, status, people targeted, and people reached remain authoritative.
 
-Do not add or populate operation `amountrequestedchf` or `amountfundedchf` in version 1. Funding is Project-owned and the financial model is deferred. GO operation funding widgets cannot be truthfully populated until that debt is resolved.
+Funding is Project-owned and the financial model is deferred. Because upstream
+GO `Appeal.amount_requested` and `amount_funded` are non-null numeric fields,
+the future version-one Operation publisher may write `0.0` to both solely as a
+technical placeholder. This must be labelled/documented as "financial data not
+yet supplied", never interpreted as observed zero, and excluded from financial
+aggregates until the next DWH phase supplies authoritative values.
 
 ### 3.5 `factactivity`
 
@@ -372,7 +388,7 @@ Status: deferred to the next DWH financial phase.
 - Do not infer Project expenditure from received funding.
 - Do not infer Operation requested/funded totals from Project budget or funding.
 - If future Operation rollups are required, the DWH phase must define allocation semantics for `bridgeprojectoperation.allocationshare`, including null shares and Projects linked to multiple Operations.
-- Until then, operation funding fields are unavailable, not zero.
+- Until then, GO stores explicit `0.0` compatibility placeholders for Operation requested/funded amounts. They represent unavailable data, not observed zero funding.
 
 ### 5.2 Country Profile/databank
 
@@ -380,18 +396,29 @@ Status: version 2.
 
 The existing Country Profile consumes World Bank, HDR, ACAPS, climate, FDRS, National Society, capacity, directory, initiative, supporting-partner, contact, and document data. Version 2 should ingest the relevant GO reference data into Gold before GO consumes it. The storage shape should be designed from the actual profile endpoint contract rather than adding all fields speculatively to `dimcountry`.
 
-### 5.3 Dimension and bridge change tracking
+### 5.3 Complete-snapshot change tracking
 
-Status: verification required.
+Status: approved for version 1.
 
-Facts have `ingestedat` and `isdeleted`; current dimensions and bridges generally do not. Confirm whether the DWH platform supplies CDC or reliable source-updated timestamps outside this schema.
+Every two hours, readers take a repeatable-read complete snapshot. The publisher
+computes deterministic content hashes over fields and ordered relationship UUIDs
+and compares them with the last successfully published metadata. Facts retain
+`ingestedat` and `isdeleted` for audit, watermark, and tombstone handling, but a
+timestamp alone is not used to decide whether content changed.
 
-If it does not, choose one of:
+All consumed bridges are complete association snapshots:
 
-1. Add `ingestedat` and `isdeleted`/active-change metadata to all dimensions and bridges used by GO; or
-2. Perform a full key-and-content-hash comparison for those relatively stable tables during every two-hour sync.
+- `bridgedisastereventcountry`
+- `bridgedisastereventlocation`
+- `bridgeprojectsector`
+- `bridgeprojectlocation`
+- `bridgeprojectoperation`
+- `bridgeprojectorganizationrole` when organization roles are enabled
+- `bridgeactivitylocation` and `bridgeactivityorganizationrole` when the Activity publisher is enabled
 
-The selected rule must be documented before incremental synchronization is implemented.
+An association absent from the next successful snapshot is removed from the GO
+cache. Duplicate relationships, null endpoints, and unresolved UUID targets fail
+the publication transaction, leaving the previous cache intact.
 
 ## 6. Publication and validation rules
 
@@ -403,7 +430,7 @@ The selected rule must be documented before incremental synchronization is imple
 - Operation rows without `operationname`, `operationcode`, or a valid operation type must be quarantined and not published as Appeals.
 - Activity rows without `activityname`, a valid lead type, an unambiguous lead organization mapping, a start date, Country, or required Event/Operation relationship must be quarantined and not published.
 - Event rows may use `dimdisasterevent.name`; Operation rows may not reuse it as their own title.
-- Missing numeric funding values must not be converted to zero.
+- Missing Project funding values must not be converted to zero. The separately documented Operation `0.0` placeholders are a temporary upstream-model compatibility exception and must not be aggregated.
 - Unknown enum/code mappings must fail validation and appear in sync metrics.
 - All source-to-GO identifiers must be stable across idempotent reruns.
 - Publication should occur in one transaction so a failed sync leaves the previously valid GO read model visible.
@@ -419,14 +446,14 @@ The isolated `grc_read_model` Django app stores only publication metadata:
 - Publication-run status, counters, and watermark ranges
 - The last successfully published watermark per source stream
 
-The serving API should use upstream's existing `DJANGO_READ_ONLY=true` configuration. The future scheduled publisher runs separately with write access and advances a watermark only in the same successful transaction as its GO cache updates. Semantic mismatches, currently including unavailable Operation funding values, still require an isolated adapter or a completed Gold source; the metadata layer must not manufacture compatible-looking values.
+The serving API should use upstream's existing `DJANGO_READ_ONLY=true` configuration. The future scheduled publisher runs separately with write access and advances a watermark only in the same successful transaction as its GO cache updates. The Operation funding placeholder is explicit documented debt caused by upstream non-null fields; the metadata layer must not turn it into an apparently authoritative aggregate.
 
 ## 7. Remaining data-contract decisions
 
-- Confirm the Operation/Appeal type mapping. Project programme type and Project operation type now use exact upstream GO integer IDs in Gold and require no textual mapping.
+- Backfill/assign exact `goappealtypeid` values. GO-sourced rows use their GO type; GRC-only rows require an explicit DWH value. The adapter never matches labels.
 - Confirm whether deployed ERUs occur in the GRC source data and how they are represented.
 - Extract and approve the exact historical GO disaggregation vocabulary and aggregation rules.
-- Confirm the DWH platform’s dimension/bridge CDC capability.
-- Migrate or expose the consumed ingestion timestamps as `timestamptz`. The adapter deliberately rejects timezone-naive values rather than assuming UTC or local time.
-- Confirm which source rule assigns `adminlevel` values. Version 1 maps only rows with `adminlevel = 1` and `godistrictid` to GO District; it accepts other levels in Gold without projecting them.
-- Confirm that Event country/location bridges are populated as complete snapshots, including multi-country Events and every ADM1 location required by the existing Event map.
+- Apply/review the approved conversion of existing naive timestamps from Berlin local time to `timestamptz` (`Europe/Berlin` in PostgreSQL; `W. Europe Standard Time` in Microsoft systems), including DST edge cases.
+- Populate DWH-owned immutable `grc_source_id` UUIDs for all entities and exact optional GO-ID columns for GO-sourced rows.
+- Add an authoritative Operation `aid`/identifier source and timestamp-level start/end values before implementing the Appeal publisher; date keys alone do not satisfy the existing contract.
+- Define how the UI should label the temporary Operation financial placeholders before Operation publication is enabled.

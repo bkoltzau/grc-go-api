@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from unittest.mock import patch
+from uuid import UUID
 
 from django.test import SimpleTestCase, TestCase
 
@@ -10,6 +11,9 @@ from grc_read_model.grc_project_sync import (
     publish_grc_project_snapshot,
 )
 from grc_read_model.models import GRCReadModelState, GRCSyncRun
+
+
+PROJECT_SOURCE_ID = UUID("40000000-0000-0000-0000-000000000001")
 
 
 def empty_snapshot(watermark):
@@ -45,7 +49,9 @@ class GRCGoldProjectSnapshotTest(SimpleTestCase):
                 projects=[],
                 deletions=[
                     GRCGoldProjectDeletion(
-                        project_id=7001,
+                        source_id=PROJECT_SOURCE_ID,
+                        project_key=7001,
+                        go_project_id=7001,
                         ingested_at=datetime(2026, 8, 22, tzinfo=timezone.utc),
                     )
                 ],
@@ -58,7 +64,9 @@ class GRCGoldProjectSnapshotTest(SimpleTestCase):
                 projects=[],
                 deletions=[
                     GRCGoldProjectDeletion(
-                        project_id=7001,
+                        source_id=PROJECT_SOURCE_ID,
+                        project_key=7001,
+                        go_project_id=7001,
                         ingested_at=datetime(2026, 8, 20),
                     )
                 ],

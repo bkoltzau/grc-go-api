@@ -99,6 +99,15 @@ class GRCSourceRecord(models.Model):
                 fields=("source_system", "entity_type", "source_id"),
                 name="grc_source_record_source_identity_uniq",
             ),
+            models.UniqueConstraint(
+                fields=(
+                    "source_system",
+                    "entity_type",
+                    "target_content_type",
+                    "target_object_id",
+                ),
+                name="grc_source_record_target_identity_uniq",
+            ),
         )
         indexes = (
             models.Index(

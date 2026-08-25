@@ -10,6 +10,33 @@
 
 BEGIN;
 
+-- DWH-owned immutable source identities. These UUIDs identify Gold entities;
+-- optional GO IDs below identify the existing GO cache row when one already
+-- exists. GRC-only entities receive their GO integer ID during publication.
+ALTER TABLE public.dimcountry ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimlocation ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimdisastertype ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimdisasterevent ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimorganization ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimoperationstatus ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimsector ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimactivitytype ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimmodality ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimdeliverymechanism ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimdonor ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimindicator ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimsex ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimagegroup ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimdisability ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimriskcategory ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimsafeguarding ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.dimyesnounknown ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.factproject ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.factoperation ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.factactivity ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.factfunding ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+ALTER TABLE public.factindicatorvalue ADD COLUMN IF NOT EXISTS grc_source_id uuid;
+
 -- Country and geography identities required by the existing GO API contract.
 ALTER TABLE public.dimcountry
     ADD COLUMN IF NOT EXISTS gocountryid integer,
@@ -58,6 +85,7 @@ CREATE TABLE IF NOT EXISTS public.bridgedisastereventlocation (
 
 -- Project identities and exact existing GO enum/reference domains.
 ALTER TABLE public.factproject
+    ADD COLUMN IF NOT EXISTS goprojectid integer,
     ADD COLUMN IF NOT EXISTS projectname character varying(500),
     ADD COLUMN IF NOT EXISTS goprojectprogrammetypeid smallint,
     ADD COLUMN IF NOT EXISTS goprojectoperationtypeid smallint;
@@ -73,6 +101,8 @@ ALTER TABLE public.dimoperationstatus
 -- Approved future Operation and Activity source fields. Their GO publication
 -- remains blocked by the mappings documented in grc_gold_contract_additions.md.
 ALTER TABLE public.factoperation
+    ADD COLUMN IF NOT EXISTS goappealid integer,
+    ADD COLUMN IF NOT EXISTS goappealtypeid smallint,
     ADD COLUMN IF NOT EXISTS operationname character varying(500),
     ADD COLUMN IF NOT EXISTS operationcode character varying(50),
     ADD COLUMN IF NOT EXISTS operationtypecode character varying(50);
@@ -84,6 +114,53 @@ ALTER TABLE public.factactivity
 
 -- Stable GO identities are unique only when present. Null remains available
 -- for Gold records that are deliberately outside the GO projection.
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimcountry_source_id_uq
+    ON public.dimcountry (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimlocation_source_id_uq
+    ON public.dimlocation (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimdisastertype_source_id_uq
+    ON public.dimdisastertype (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimdisasterevent_source_id_uq
+    ON public.dimdisasterevent (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimorganization_source_id_uq
+    ON public.dimorganization (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimoperationstatus_source_id_uq
+    ON public.dimoperationstatus (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimsector_source_id_uq
+    ON public.dimsector (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimactivitytype_source_id_uq
+    ON public.dimactivitytype (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimmodality_source_id_uq
+    ON public.dimmodality (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimdeliverymechanism_source_id_uq
+    ON public.dimdeliverymechanism (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimdonor_source_id_uq
+    ON public.dimdonor (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimindicator_source_id_uq
+    ON public.dimindicator (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimsex_source_id_uq
+    ON public.dimsex (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimagegroup_source_id_uq
+    ON public.dimagegroup (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimdisability_source_id_uq
+    ON public.dimdisability (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimriskcategory_source_id_uq
+    ON public.dimriskcategory (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimsafeguarding_source_id_uq
+    ON public.dimsafeguarding (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_dimyesnounknown_source_id_uq
+    ON public.dimyesnounknown (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_factproject_source_id_uq
+    ON public.factproject (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_factoperation_source_id_uq
+    ON public.factoperation (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_factactivity_source_id_uq
+    ON public.factactivity (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_factfunding_source_id_uq
+    ON public.factfunding (grc_source_id) WHERE grc_source_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grc_factindicatorvalue_source_id_uq
+    ON public.factindicatorvalue (grc_source_id) WHERE grc_source_id IS NOT NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS grc_dimcountry_gocountryid_uq
     ON public.dimcountry (gocountryid)
     WHERE gocountryid IS NOT NULL;
@@ -99,6 +176,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS grc_dimdisastertype_goid_uq
 CREATE UNIQUE INDEX IF NOT EXISTS grc_dimdisasterevent_goeventid_uq
     ON public.dimdisasterevent (goeventid)
     WHERE goeventid IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS grc_factproject_goprojectid_uq
+    ON public.factproject (goprojectid)
+    WHERE goprojectid IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS grc_factoperation_goappealid_uq
+    ON public.factoperation (goappealid)
+    WHERE goappealid IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS grc_dimsector_goprimaryid_uq
     ON public.dimsector (goprojectprimarysectorid)
@@ -203,16 +288,50 @@ BEGIN
 END
 $$;
 
+-- Approved interpretation of existing naive ingestion timestamps: Berlin local
+-- civil time. PostgreSQL uses the IANA name Europe/Berlin; Microsoft/Windows
+-- systems use W. Europe Standard Time for the same deployment convention.
+DO $$
+DECLARE
+    grc_table_name text;
+BEGIN
+    FOREACH grc_table_name IN ARRAY ARRAY[
+        'factproject',
+        'factoperation',
+        'factactivity',
+        'factfunding',
+        'factindicatorvalue'
+    ]
+    LOOP
+        IF EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = grc_table_name
+              AND column_name = 'ingestedat'
+              AND data_type = 'timestamp without time zone'
+        ) THEN
+            EXECUTE format(
+                'ALTER TABLE public.%I ALTER COLUMN ingestedat '
+                'TYPE timestamp with time zone '
+                'USING ingestedat AT TIME ZONE %L',
+                grc_table_name,
+                'Europe/Berlin'
+            );
+        END IF;
+    END LOOP;
+END
+$$;
+
 COMMIT;
 
 -- REQUIRED MANUAL FOLLOW-UP
 --
--- factproject.ingestedat, factoperation.ingestedat, factactivity.ingestedat,
--- factfunding.ingestedat, and factindicatorvalue.ingestedat are currently
--- `timestamp without time zone`. Do not write an automatic conversion here:
--- `AT TIME ZONE` requires the DWH team to approve the timezone represented by
--- existing values. Convert or expose every timestamp consumed by GO as
--- `timestamp with time zone`, then run `manage.py grc_check_dwh_contract`.
+-- Review ambiguous/nonexistent daylight-saving transition times before applying
+-- the approved Europe/Berlin conversion, then run grc_check_dwh_contract.
+-- After every entity UUID is backfilled and stable, set each grc_source_id
+-- column NOT NULL through the DWH migration process. The partial unique indexes
+-- above protect backfill uniqueness but intentionally permit staged nulls.
 --
 -- Validate the five NOT VALID foreign keys after their backfill has passed the
 -- data-quality checks, for example:

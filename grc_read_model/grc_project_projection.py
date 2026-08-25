@@ -4,19 +4,41 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from uuid import UUID
 
-from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from django.utils import timezone
 
 from api.models import Country, DisasterType, District, Event, VisibilityCharChoices
 from deployments.models import OperationTypes, ProgrammeTypes, Project, Sector, SectorTag
+from grc_read_model.grc_identity import (
+    GRCIdentityError,
+    grc_source_content_matches,
+    parse_grc_source_id,
+    publish_grc_source_record,
+    resolve_grc_target_id as _resolve_grc_target_id,
+    resolve_grc_target_map as _resolve_grc_target_map,
+)
 from grc_read_model.grc_project_reference import GRCProjectControlledValues
-from grc_read_model.models import GRCEntityType, GRCSourceRecord, GRCSyncRun
+from grc_read_model.models import GRCEntityType, GRCSyncRun
 
 
 class GRCProjectProjectionError(ValueError):
     pass
+
+
+def _resolve_target_id(**kwargs) -> int | None:
+    try:
+        return _resolve_grc_target_id(**kwargs)
+    except GRCIdentityError as exc:
+        raise GRCProjectProjectionError(str(exc)) from exc
+
+
+def _resolve_target_map(**kwargs) -> dict[UUID, int]:
+    try:
+        return _resolve_grc_target_map(**kwargs)
+    except GRCIdentityError as exc:
+        raise GRCProjectProjectionError(str(exc)) from exc
 
 
 _MAX_GO_INTEGER = 2_147_483_647
@@ -104,14 +126,26 @@ def _integer_tuple(row: Mapping[str, object], field: str, *, allow_zero: bool = 
     return normalized
 
 
+def _uuid_tuple(row: Mapping[str, object], field: str) -> tuple[UUID, ...]:
+    value = row.get(field)
+    if not isinstance(value, (list, tuple)):
+        raise GRCProjectProjectionError(f"{field} must be a list or tuple of UUIDs")
+    normalized = tuple(parse_grc_source_id(item, field) for item in value)
+    if len(normalized) != len(set(normalized)):
+        raise GRCProjectProjectionError(f"{field} must not contain duplicate UUIDs")
+    return normalized
+
+
 @dataclass(frozen=True)
 class GRCGoldProject:
-    project_id: int
+    source_id: UUID
+    project_key: int
+    go_project_id: int | None
     name: str
-    reporting_ns_country_id: int
-    project_country_id: int
-    district_ids: tuple[int, ...]
-    event_id: int | None
+    reporting_ns_country_source_id: UUID
+    project_country_source_id: UUID
+    district_source_ids: tuple[UUID, ...]
+    event_source_id: UUID | None
     disaster_type_id: int | None
     primary_sector_id: int
     secondary_sector_tag_ids: tuple[int, ...]
@@ -126,20 +160,33 @@ class GRCGoldProject:
 
     @classmethod
     def from_gold_row(cls, row: Mapping[str, object]) -> "GRCGoldProject":
-        event_id = _optional_int(row, "goeventid")
+        event_source_id = (
+            parse_grc_source_id(row.get("event_grc_source_id"), "event_grc_source_id")
+            if row.get("event_grc_source_id") is not None
+            else None
+        )
         disaster_type_id = _optional_int(row, "godisastertypeid")
-        if (event_id is None) != (disaster_type_id is None):
+        if (event_source_id is None) != (disaster_type_id is None):
             raise GRCProjectProjectionError(
-                "goeventid and godisastertypeid must either both resolve through the primary Operation or both be null"
+                "event_grc_source_id and godisastertypeid must either both resolve through "
+                "the primary Operation or both be null"
             )
 
         project = cls(
-            project_id=_required_int(row, "projectid"),
+            source_id=parse_grc_source_id(row.get("grc_source_id")),
+            project_key=_required_int(row, "projectid"),
+            go_project_id=_optional_int(row, "goprojectid"),
             name=_required_string(row, "projectname", 500),
-            reporting_ns_country_id=_required_int(row, "goreportingnscountryid"),
-            project_country_id=_required_int(row, "goprojectcountryid"),
-            district_ids=_integer_tuple(row, "godistrictids"),
-            event_id=event_id,
+            reporting_ns_country_source_id=parse_grc_source_id(
+                row.get("reporting_ns_country_grc_source_id"),
+                "reporting_ns_country_grc_source_id",
+            ),
+            project_country_source_id=parse_grc_source_id(
+                row.get("project_country_grc_source_id"),
+                "project_country_grc_source_id",
+            ),
+            district_source_ids=_uuid_tuple(row, "district_grc_source_ids"),
+            event_source_id=event_source_id,
             disaster_type_id=disaster_type_id,
             primary_sector_id=_required_int(row, "goprojectprimarysectorid", allow_zero=True),
             secondary_sector_tag_ids=_integer_tuple(
@@ -159,7 +206,7 @@ class GRCGoldProject:
         if (
             project.controlled_values.operation_type == OperationTypes.EMERGENCY_OPERATION
             and project.controlled_values.programme_type == ProgrammeTypes.MULTILATERAL
-            and project.event_id is None
+            and project.event_source_id is None
         ):
             raise GRCProjectProjectionError(
                 "a multilateral Emergency Operation Project requires a primary Operation linked to a GO Event"
@@ -177,30 +224,36 @@ class GRCGoldProject:
                 "status": self.controlled_values.status,
             },
             "disaster_type_id": self.disaster_type_id,
-            "district_ids": sorted(self.district_ids),
-            "event_id": self.event_id,
+            "district_source_ids": sorted(str(value) for value in self.district_source_ids),
+            "event_source_id": str(self.event_source_id) if self.event_source_id else None,
             "name": self.name,
             "primary_sector_id": self.primary_sector_id,
-            "project_country_id": self.project_country_id,
-            "project_id": self.project_id,
+            "project_country_source_id": str(self.project_country_source_id),
             "reached_total": self.reached_total,
             "reporting_contact_email": self.reporting_contact_email,
             "reporting_contact_name": self.reporting_contact_name,
             "reporting_contact_role": self.reporting_contact_role,
-            "reporting_ns_country_id": self.reporting_ns_country_id,
+            "reporting_ns_country_source_id": str(self.reporting_ns_country_source_id),
             "secondary_sector_tag_ids": sorted(self.secondary_sector_tag_ids),
             "target_total": self.target_total,
         }
         serialized = json.dumps(content, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-    def project_defaults(self, as_of: date) -> dict[str, object]:
+    def project_defaults(
+        self,
+        as_of: date,
+        *,
+        reporting_ns_country_id: int,
+        project_country_id: int,
+        event_id: int | None,
+    ) -> dict[str, object]:
         return {
             **self.controlled_values.project_defaults(as_of),
             "name": self.name,
-            "reporting_ns_id": self.reporting_ns_country_id,
-            "project_country_id": self.project_country_id,
-            "event_id": self.event_id,
+            "reporting_ns_id": reporting_ns_country_id,
+            "project_country_id": project_country_id,
+            "event_id": event_id,
             "dtype_id": self.disaster_type_id,
             "primary_sector_id": self.primary_sector_id,
             "budget_amount": self.budget_amount,
@@ -224,18 +277,22 @@ class GRCGoldProject:
 
 @dataclass(frozen=True)
 class GRCGoldProjectDeletion:
-    project_id: int
+    source_id: UUID
+    project_key: int
+    go_project_id: int | None
     ingested_at: datetime
 
     @classmethod
     def from_gold_row(cls, row: Mapping[str, object]) -> "GRCGoldProjectDeletion":
         return cls(
-            project_id=_required_int(row, "projectid"),
+            source_id=parse_grc_source_id(row.get("grc_source_id")),
+            project_key=_required_int(row, "projectid"),
+            go_project_id=_optional_int(row, "goprojectid"),
             ingested_at=_required_datetime(row, "ingestedat"),
         )
 
     def content_hash(self) -> str:
-        return hashlib.sha256(f"deleted:{self.project_id}".encode("ascii")).hexdigest()
+        return hashlib.sha256(f"deleted:{self.source_id}".encode("ascii")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -244,6 +301,7 @@ class GRCProjectPublicationResult:
     rows_created: int
     rows_updated: int
     rows_deleted: int
+    rows_unchanged: int = 0
 
 
 def _validate_project_batch(
@@ -252,49 +310,77 @@ def _validate_project_batch(
     *,
     as_of: date,
 ) -> None:
-    project_ids = [record.project_id for record in records]
-    deleted_ids = [record.project_id for record in deletions]
-    if len(project_ids) != len(set(project_ids)):
-        raise GRCProjectProjectionError("duplicate projectid in active Project snapshot")
-    if len(deleted_ids) != len(set(deleted_ids)):
-        raise GRCProjectProjectionError("duplicate projectid in Project deletion snapshot")
-    overlap = set(project_ids) & set(deleted_ids)
+    unique_snapshots = {
+        "active grc_source_id": [record.source_id for record in records],
+        "active projectid": [record.project_key for record in records],
+        "active goprojectid": [
+            record.go_project_id for record in records if record.go_project_id is not None
+        ],
+        "deleted grc_source_id": [record.source_id for record in deletions],
+        "deleted projectid": [record.project_key for record in deletions],
+        "deleted goprojectid": [
+            record.go_project_id for record in deletions if record.go_project_id is not None
+        ],
+    }
+    for field, values in unique_snapshots.items():
+        if len(values) != len(set(values)):
+            raise GRCProjectProjectionError(f"duplicate {field} in Project snapshot")
+
+    overlap = {record.source_id for record in records} & {
+        record.source_id for record in deletions
+    }
     if overlap:
-        values = ", ".join(str(value) for value in sorted(overlap))
-        raise GRCProjectProjectionError(f"Project IDs cannot be both active and deleted: {values}")
+        values = ", ".join(str(value) for value in sorted(overlap, key=str))
+        raise GRCProjectProjectionError(
+            f"Project source GUIDs cannot be both active and deleted: {values}"
+        )
 
     for record in records:
         record.controlled_values.project_defaults(as_of)
 
 
-def _validate_project_dependencies(records: Sequence[GRCGoldProject]) -> None:
-    country_ids = {
-        country_id
+def _validate_project_dependencies(
+    records: Sequence[GRCGoldProject],
+    *,
+    source_system: str,
+) -> tuple[dict[UUID, int], dict[UUID, int], dict[UUID, int]]:
+    country_source_ids = {
+        source_id
         for record in records
-        for country_id in (record.project_country_id, record.reporting_ns_country_id)
+        for source_id in (
+            record.project_country_source_id,
+            record.reporting_ns_country_source_id,
+        )
     }
-    countries = Country.objects.in_bulk(country_ids)
-    missing_country_ids = country_ids - set(countries)
-    if missing_country_ids:
-        values = ", ".join(str(value) for value in sorted(missing_country_ids))
-        raise GRCProjectProjectionError(f"Country projection must run first; missing GO ID(s): {values}")
+    country_target_ids = _resolve_target_map(
+        source_system=source_system,
+        entity_type=GRCEntityType.COUNTRY,
+        source_ids=country_source_ids,
+        target_model=Country,
+    )
 
-    district_ids = {district_id for record in records for district_id in record.district_ids}
-    districts = District.objects.in_bulk(district_ids)
-    missing_district_ids = district_ids - set(districts)
-    if missing_district_ids:
-        values = ", ".join(str(value) for value in sorted(missing_district_ids))
-        raise GRCProjectProjectionError(f"District projection must run first; missing GO ID(s): {values}")
+    district_source_ids = {
+        source_id for record in records for source_id in record.district_source_ids
+    }
+    district_target_ids = _resolve_target_map(
+        source_system=source_system,
+        entity_type=GRCEntityType.DISTRICT,
+        source_ids=district_source_ids,
+        target_model=District,
+    )
+    districts = District.objects.in_bulk(district_target_ids.values())
     for record in records:
         outside_country_ids = sorted(
-            district_id
-            for district_id in record.district_ids
-            if districts[district_id].country_id != record.project_country_id
+            str(district_source_id)
+            for district_source_id in record.district_source_ids
+            if districts[district_target_ids[district_source_id]].country_id
+            != country_target_ids[record.project_country_source_id]
         )
         if outside_country_ids:
             values = ", ".join(str(value) for value in outside_country_ids)
             raise GRCProjectProjectionError(
-                f"Project {record.project_id} Districts must belong to its Project Country; invalid GO ID(s): {values}"
+                f"Project {record.source_id} Districts must belong to its Project Country; "
+                f"invalid source GUID(s): {values}"
             )
 
     primary_sector_ids = {record.primary_sector_id for record in records}
@@ -311,12 +397,16 @@ def _validate_project_dependencies(records: Sequence[GRCGoldProject]) -> None:
         values = ", ".join(str(value) for value in sorted(missing_secondary_sector_ids))
         raise GRCProjectProjectionError(f"missing upstream GO Project SectorTag ID(s): {values}")
 
-    event_ids = {record.event_id for record in records if record.event_id is not None}
-    events = Event.objects.in_bulk(event_ids)
-    missing_event_ids = event_ids - set(events)
-    if missing_event_ids:
-        values = ", ".join(str(value) for value in sorted(missing_event_ids))
-        raise GRCProjectProjectionError(f"Event projection must run first; missing GO ID(s): {values}")
+    event_source_ids = {
+        record.event_source_id for record in records if record.event_source_id is not None
+    }
+    event_target_ids = _resolve_target_map(
+        source_system=source_system,
+        entity_type=GRCEntityType.DISASTER_EVENT,
+        source_ids=event_source_ids,
+        target_model=Event,
+    )
+    events = Event.objects.in_bulk(event_target_ids.values())
 
     disaster_type_ids = {
         record.disaster_type_id for record in records if record.disaster_type_id is not None
@@ -327,13 +417,18 @@ def _validate_project_dependencies(records: Sequence[GRCGoldProject]) -> None:
         raise GRCProjectProjectionError(f"missing upstream GO DisasterType ID(s): {values}")
 
     mismatched_events = sorted(
-        record.event_id
+        str(record.event_source_id)
         for record in records
-        if record.event_id is not None and events[record.event_id].dtype_id != record.disaster_type_id
+        if record.event_source_id is not None
+        and events[event_target_ids[record.event_source_id]].dtype_id != record.disaster_type_id
     )
     if mismatched_events:
         values = ", ".join(str(value) for value in mismatched_events)
-        raise GRCProjectProjectionError(f"Project primary Operation/Event disaster type mismatch for GO Event ID(s): {values}")
+        raise GRCProjectProjectionError(
+            f"Project primary Operation/Event disaster type mismatch for source GUID(s): {values}"
+        )
+
+    return country_target_ids, district_target_ids, event_target_ids
 
 
 def publish_grc_project_records(
@@ -362,37 +457,97 @@ def publish_grc_project_records(
         raise GRCProjectProjectionError("deletions must contain only GRCGoldProjectDeletion records")
 
     _validate_project_batch(records, deletions, as_of=as_of)
-    _validate_project_dependencies(records)
+    country_target_ids, district_target_ids, event_target_ids = _validate_project_dependencies(
+        records,
+        source_system=source_system,
+    )
 
     created_count = 0
+    deleted_count = 0
+    unchanged_count = 0
     with transaction.atomic():
-        target_content_type = ContentType.objects.get_for_model(Project)
         published_at = timezone.now()
 
         for deletion in deletions:
-            Project.objects.filter(pk=deletion.project_id).delete()
-            GRCSourceRecord.objects.update_or_create(
+            target_id = _resolve_target_id(
                 source_system=source_system,
                 entity_type=GRCEntityType.PROJECT,
-                source_id=str(deletion.project_id),
-                defaults={
-                    "source_ingested_at": deletion.ingested_at,
-                    "content_hash": deletion.content_hash(),
-                    "is_deleted": True,
-                    "target_content_type": target_content_type,
-                    "target_object_id": deletion.project_id,
-                    "last_successful_run": sync_run,
-                    "published_at": published_at,
-                },
+                source_id=deletion.source_id,
+                target_model=Project,
+                preferred_target_id=deletion.go_project_id,
+            )
+            if target_id is None:
+                continue
+            unchanged_count += int(
+                grc_source_content_matches(
+                    source_system=source_system,
+                    entity_type=GRCEntityType.PROJECT,
+                    source_id=deletion.source_id,
+                    target_model=Project,
+                    target_object_id=target_id,
+                    content_hash=deletion.content_hash(),
+                    is_deleted=True,
+                )
+            )
+            target_exists = Project.objects.filter(pk=target_id).exists()
+            Project.objects.filter(pk=target_id).delete()
+            deleted_count += int(target_exists)
+            publish_grc_source_record(
+                source_system=source_system,
+                entity_type=GRCEntityType.PROJECT,
+                source_id=deletion.source_id,
+                target_model=Project,
+                target_object_id=target_id,
+                source_ingested_at=deletion.ingested_at,
+                content_hash=deletion.content_hash(),
+                is_deleted=True,
+                sync_run=sync_run,
+                published_at=published_at,
             )
 
         for record in records:
-            project, created = Project.objects.update_or_create(
-                pk=record.project_id,
-                defaults=record.project_defaults(as_of),
+            target_id = _resolve_target_id(
+                source_system=source_system,
+                entity_type=GRCEntityType.PROJECT,
+                source_id=record.source_id,
+                target_model=Project,
+                preferred_target_id=record.go_project_id,
             )
+            unchanged_count += int(
+                grc_source_content_matches(
+                    source_system=source_system,
+                    entity_type=GRCEntityType.PROJECT,
+                    source_id=record.source_id,
+                    target_model=Project,
+                    target_object_id=target_id,
+                    content_hash=record.content_hash(),
+                    is_deleted=False,
+                )
+            )
+            defaults = record.project_defaults(
+                as_of,
+                reporting_ns_country_id=country_target_ids[
+                    record.reporting_ns_country_source_id
+                ],
+                project_country_id=country_target_ids[record.project_country_source_id],
+                event_id=(
+                    event_target_ids[record.event_source_id]
+                    if record.event_source_id is not None
+                    else None
+                ),
+            )
+            if target_id is None:
+                project = Project.objects.create(**defaults)
+                created = True
+            else:
+                project, created = Project.objects.update_or_create(
+                    pk=target_id,
+                    defaults=defaults,
+                )
             created_count += int(created)
-            project.project_districts.set(record.district_ids)
+            project.project_districts.set(
+                district_target_ids[source_id] for source_id in record.district_source_ids
+            )
             project.secondary_sectors.set(record.secondary_sector_tag_ids)
             project.annual_splits.all().delete()
             Project.objects.filter(pk=project.pk).update(
@@ -400,24 +555,23 @@ def publish_grc_project_records(
                 modified_at=record.ingested_at,
             )
 
-            GRCSourceRecord.objects.update_or_create(
+            publish_grc_source_record(
                 source_system=source_system,
                 entity_type=GRCEntityType.PROJECT,
-                source_id=str(record.project_id),
-                defaults={
-                    "source_ingested_at": record.ingested_at,
-                    "content_hash": record.content_hash(),
-                    "is_deleted": False,
-                    "target_content_type": target_content_type,
-                    "target_object_id": record.project_id,
-                    "last_successful_run": sync_run,
-                    "published_at": published_at,
-                },
+                source_id=record.source_id,
+                target_model=Project,
+                target_object_id=project.pk,
+                source_ingested_at=record.ingested_at,
+                content_hash=record.content_hash(),
+                is_deleted=False,
+                sync_run=sync_run,
+                published_at=published_at,
             )
 
     return GRCProjectPublicationResult(
         rows_seen=len(records) + len(deletions),
         rows_created=created_count,
         rows_updated=len(records) - created_count,
-        rows_deleted=len(deletions),
+        rows_deleted=deleted_count,
+        rows_unchanged=unchanged_count,
     )

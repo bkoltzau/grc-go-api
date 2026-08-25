@@ -48,7 +48,7 @@ class GRCGoldProjectSnapshot:
 
         for field in ("projects", "deletions"):
             invalid_timestamp_ids = [
-                record.project_id
+                record.source_id
                 for record in getattr(self, field)
                 if not isinstance(record.ingested_at, datetime)
                 or record.ingested_at.tzinfo is None
@@ -59,7 +59,7 @@ class GRCGoldProjectSnapshot:
                 raise GRCProjectSyncError(f"{field} contain invalid ingestion timestamps: {values}")
 
             future_project_ids = [
-                record.project_id
+                record.source_id
                 for record in getattr(self, field)
                 if record.ingested_at > self.watermark
             ]

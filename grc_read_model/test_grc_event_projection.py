@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import UUID
 
 from django.test import SimpleTestCase, TestCase
 
@@ -10,7 +11,17 @@ from grc_read_model.grc_event_projection import (
     publish_grc_event_snapshot,
     validate_grc_disaster_types,
 )
+from grc_read_model.grc_identity import publish_grc_source_record
 from grc_read_model.models import GRCEntityType, GRCSourceRecord, GRCSyncRun
+
+
+COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000001")
+OTHER_COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000002")
+MISSING_COUNTRY_SOURCE_ID = UUID("10000000-0000-0000-0000-000000000099")
+DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000001")
+OTHER_DISTRICT_SOURCE_ID = UUID("20000000-0000-0000-0000-000000000002")
+EVENT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
+OTHER_EVENT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000002")
 
 
 def disaster_type_row(**overrides):
@@ -27,6 +38,7 @@ def disaster_type_row(**overrides):
 
 def event_row(**overrides):
     row = {
+        "grc_source_id": EVENT_SOURCE_ID,
         "disastereventkey": 30,
         "goeventid": 3001,
         "godisastertypeid": 5,
@@ -37,8 +49,8 @@ def event_row(**overrides):
         "peopleaffected": 1000,
         "goifrcseveritylevelid": AlertLevel.ORANGE,
         "ifrcseveritylevelupdatedat": datetime(2026, 6, 2, tzinfo=timezone.utc),
-        "gocountryids": [276],
-        "godistrictids": [1001],
+        "country_grc_source_ids": [COUNTRY_SOURCE_ID],
+        "district_grc_source_ids": [DISTRICT_SOURCE_ID],
         "isactive": True,
         "sourceupdatedat": datetime(2026, 6, 3, tzinfo=timezone.utc),
         "ingestedat": datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -71,8 +83,8 @@ class GRCGoldDisasterEventTest(SimpleTestCase):
         event = GRCGoldDisasterEvent.from_gold_row(event_row())
 
         self.assertEqual(event.go_event_id, 3001)
-        self.assertEqual(event.go_country_ids, (276,))
-        self.assertEqual(event.go_district_ids, (1001,))
+        self.assertEqual(event.country_source_ids, (COUNTRY_SOURCE_ID,))
+        self.assertEqual(event.district_source_ids, (DISTRICT_SOURCE_ID,))
         self.assertEqual(event.event_defaults()["visibility"], VisibilityChoices.MEMBERSHIP)
         self.assertEqual(len(event.content_hash()), 64)
 
@@ -96,9 +108,9 @@ class GRCGoldDisasterEventTest(SimpleTestCase):
             event_row(disasterstartat=datetime(2026, 6, 1)),
             event_row(peopleaffected=-1),
             event_row(goifrcseveritylevelid=99),
-            event_row(gocountryids=[]),
-            event_row(gocountryids=[276, 276]),
-            event_row(godistrictids=[1001, 1001]),
+            event_row(country_grc_source_ids=[]),
+            event_row(country_grc_source_ids=[COUNTRY_SOURCE_ID, COUNTRY_SOURCE_ID]),
+            event_row(district_grc_source_ids=[DISTRICT_SOURCE_ID, DISTRICT_SOURCE_ID]),
             event_row(ingestedat=datetime(2026, 6, 4)),
         )
         for row in invalid_rows:
@@ -137,6 +149,23 @@ class GRCEventPublisherTest(TestCase):
         )
         self.disaster_type = DisasterType.objects.create(pk=5, name="Flood", summary="Flood")
         self.sync_run = GRCSyncRun.objects.create(pipeline="dimdisasterevent")
+        for entity_type, source_id, model, target_id in (
+            (GRCEntityType.COUNTRY, COUNTRY_SOURCE_ID, Country, self.country.pk),
+            (GRCEntityType.COUNTRY, OTHER_COUNTRY_SOURCE_ID, Country, self.other_country.pk),
+            (GRCEntityType.DISTRICT, DISTRICT_SOURCE_ID, District, self.district.pk),
+            (GRCEntityType.DISTRICT, OTHER_DISTRICT_SOURCE_ID, District, self.other_district.pk),
+        ):
+            publish_grc_source_record(
+                source_system="grc_gold",
+                entity_type=entity_type,
+                source_id=source_id,
+                target_model=model,
+                target_object_id=target_id,
+                source_ingested_at=None,
+                content_hash="a" * 64,
+                is_deleted=False,
+                sync_run=self.sync_run,
+            )
 
     def test_validates_existing_disaster_type_identity(self):
         validate_grc_disaster_types(
@@ -159,8 +188,8 @@ class GRCEventPublisherTest(TestCase):
     def test_publishes_event_and_complete_geography(self):
         record = GRCGoldDisasterEvent.from_gold_row(
             event_row(
-                gocountryids=[276, 250],
-                godistrictids=[1001, 1002],
+                country_grc_source_ids=[COUNTRY_SOURCE_ID, OTHER_COUNTRY_SOURCE_ID],
+                district_grc_source_ids=[DISTRICT_SOURCE_ID, OTHER_DISTRICT_SOURCE_ID],
             )
         )
 
@@ -180,7 +209,7 @@ class GRCEventPublisherTest(TestCase):
         source_record = GRCSourceRecord.objects.get(
             source_system="grc_gold",
             entity_type=GRCEntityType.DISASTER_EVENT,
-            source_id="3001",
+            source_id=str(EVENT_SOURCE_ID),
         )
         self.assertEqual(source_record.target_object, event)
         self.assertEqual(source_record.content_hash, record.content_hash())
@@ -201,29 +230,41 @@ class GRCEventPublisherTest(TestCase):
 
         self.assertEqual(first_result.rows_created, 0)
         self.assertEqual(second_result.rows_updated, 1)
+        self.assertEqual(second_result.rows_unchanged, 1)
         self.assertEqual(Event.objects.count(), 1)
         event = Event.objects.get(pk=3001)
         self.assertEqual(event.name, "Central Europe floods")
         self.assertEqual(event.slug, "old-event")
         self.assertTrue(event.hide_field_report_map)
-        self.assertEqual(GRCSourceRecord.objects.count(), 1)
+        self.assertEqual(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.DISASTER_EVENT).count(),
+            1,
+        )
 
     def test_rejects_missing_or_inconsistent_geography_before_writing(self):
-        missing_country = GRCGoldDisasterEvent.from_gold_row(event_row(gocountryids=[999]))
-        outside_country = GRCGoldDisasterEvent.from_gold_row(event_row(godistrictids=[1002]))
+        missing_country = GRCGoldDisasterEvent.from_gold_row(
+            event_row(country_grc_source_ids=[MISSING_COUNTRY_SOURCE_ID])
+        )
+        outside_country = GRCGoldDisasterEvent.from_gold_row(
+            event_row(district_grc_source_ids=[OTHER_DISTRICT_SOURCE_ID])
+        )
 
         for record in (missing_country, outside_country):
             with self.subTest(record=record), self.assertRaises(GRCEventProjectionError):
                 publish_grc_event_snapshot([record], self.sync_run)
 
         self.assertFalse(Event.objects.exists())
-        self.assertFalse(GRCSourceRecord.objects.exists())
+        self.assertFalse(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.DISASTER_EVENT).exists()
+        )
 
     def test_rejects_inactive_or_duplicate_events_before_writing(self):
         first = GRCGoldDisasterEvent.from_gold_row(event_row())
         inactive = GRCGoldDisasterEvent.from_gold_row(event_row(isactive=False))
         duplicate_source = GRCGoldDisasterEvent.from_gold_row(event_row(goeventid=3002))
-        duplicate_target = GRCGoldDisasterEvent.from_gold_row(event_row(disastereventkey=31))
+        duplicate_target = GRCGoldDisasterEvent.from_gold_row(
+            event_row(disastereventkey=31, grc_source_id=OTHER_EVENT_SOURCE_ID)
+        )
 
         invalid_batches = ([inactive], [first, duplicate_source], [first, duplicate_target])
         for records in invalid_batches:
@@ -231,7 +272,9 @@ class GRCEventPublisherTest(TestCase):
                 publish_grc_event_snapshot(records, self.sync_run)
 
         self.assertFalse(Event.objects.exists())
-        self.assertFalse(GRCSourceRecord.objects.exists())
+        self.assertFalse(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.DISASTER_EVENT).exists()
+        )
 
     def test_requires_saved_running_sync_run(self):
         record = GRCGoldDisasterEvent.from_gold_row(event_row())
@@ -246,4 +289,6 @@ class GRCEventPublisherTest(TestCase):
                 publish_grc_event_snapshot([record], sync_run)
 
         self.assertFalse(Event.objects.exists())
-        self.assertFalse(GRCSourceRecord.objects.exists())
+        self.assertFalse(
+            GRCSourceRecord.objects.filter(entity_type=GRCEntityType.DISASTER_EVENT).exists()
+        )
