@@ -3,7 +3,8 @@ from datetime import datetime
 from uuid import UUID
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import models
+from django.db import connection, models
+from django.db.models import Max
 from django.utils import timezone
 
 from grc_read_model.models import GRCSourceRecord, GRCSyncRun
@@ -11,6 +12,35 @@ from grc_read_model.models import GRCSourceRecord, GRCSyncRun
 
 class GRCIdentityError(ValueError):
     pass
+
+
+def advance_grc_target_sequence(target_model: type[models.Model]) -> None:
+    """Advance, but never rewind, a GO PostgreSQL integer-ID sequence."""
+
+    target_content_type = ContentType.objects.get_for_model(target_model)
+    mapped_max = (
+        GRCSourceRecord.objects.filter(target_content_type=target_content_type).aggregate(
+            value=Max("target_object_id")
+        )["value"]
+        or 0
+    )
+    table_name = connection.ops.quote_name(target_model._meta.db_table)
+    pk_column = connection.ops.quote_name(target_model._meta.pk.column)
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_get_serial_sequence(%s, %s)",
+            [target_model._meta.db_table, target_model._meta.pk.column],
+        )
+        sequence_name = cursor.fetchone()[0]
+        if sequence_name is None:
+            raise GRCIdentityError(f"GO {target_model.__name__} does not have an integer-ID sequence")
+        cursor.execute(
+            f"SELECT setval(%s::regclass, "
+            f"GREATEST(nextval(%s::regclass), COALESCE(MAX({pk_column}), 0), %s), TRUE) "
+            f"FROM {table_name}",
+            [sequence_name, sequence_name, mapped_max],
+        )
 
 
 def parse_grc_source_id(value: object, field: str = "grc_source_id") -> UUID:

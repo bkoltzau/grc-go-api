@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from unittest.mock import patch
 from uuid import UUID
 
 from django.contrib.contenttypes.models import ContentType
@@ -6,6 +7,7 @@ from django.test import TestCase
 
 from api.models import Country
 from grc_read_model.grc_identity import (
+    advance_grc_target_sequence,
     GRCIdentityError,
     grc_source_content_matches,
     parse_grc_source_id,
@@ -42,6 +44,23 @@ class GRCIdentityTest(TestCase):
         self.assertEqual(parse_grc_source_id(str(SOURCE_ID).upper()), SOURCE_ID)
         with self.assertRaisesRegex(GRCIdentityError, "must be a UUID"):
             parse_grc_source_id("project-123")
+
+    @patch("grc_read_model.grc_identity.connection")
+    def test_advances_target_sequence_without_reusing_mapped_ids(self, mock_connection):
+        self.publish_mapping(target_object_id=900)
+        mock_connection.ops.quote_name.side_effect = lambda value: f'"{value}"'
+        cursor = mock_connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = ("public.api_country_id_seq",)
+
+        advance_grc_target_sequence(Country)
+
+        self.assertEqual(cursor.execute.call_count, 2)
+        sequence_call = cursor.execute.call_args_list[1]
+        self.assertIn("GREATEST(nextval(%s::regclass)", sequence_call.args[0])
+        self.assertEqual(
+            sequence_call.args[1],
+            ["public.api_country_id_seq", "public.api_country_id_seq", 900],
+        )
 
     def test_resolves_preferred_or_allocated_target_identity(self):
         self.assertEqual(

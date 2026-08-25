@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from api.models import AlertLevel, Country, DisasterType, District, Event, VisibilityChoices
 from grc_read_model.grc_identity import (
+    advance_grc_target_sequence,
     GRCIdentityError,
     grc_source_content_matches,
     parse_grc_source_id,
@@ -332,6 +333,7 @@ def publish_grc_event_snapshot(
     unchanged_count = 0
     with transaction.atomic():
         published_at = timezone.now()
+        target_sequence_dirty = True
 
         for record in records:
             target_id = _resolve_target_id(
@@ -353,6 +355,9 @@ def publish_grc_event_snapshot(
                 )
             )
             if target_id is None:
+                if target_sequence_dirty:
+                    advance_grc_target_sequence(Event)
+                    target_sequence_dirty = False
                 event = Event.objects.create(**record.event_defaults())
                 created = True
             else:
@@ -360,6 +365,7 @@ def publish_grc_event_snapshot(
                     pk=target_id,
                     defaults=record.event_defaults(),
                 )
+                target_sequence_dirty = target_sequence_dirty or created
             created_count += int(created)
 
             event_countries = [

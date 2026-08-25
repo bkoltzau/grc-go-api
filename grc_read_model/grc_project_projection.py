@@ -12,6 +12,7 @@ from django.utils import timezone
 from api.models import Country, DisasterType, District, Event, VisibilityCharChoices
 from deployments.models import OperationTypes, ProgrammeTypes, Project, Sector, SectorTag
 from grc_read_model.grc_identity import (
+    advance_grc_target_sequence,
     GRCIdentityError,
     grc_source_content_matches,
     parse_grc_source_id,
@@ -467,6 +468,7 @@ def publish_grc_project_records(
     unchanged_count = 0
     with transaction.atomic():
         published_at = timezone.now()
+        target_sequence_dirty = True
 
         for deletion in deletions:
             target_id = _resolve_target_id(
@@ -537,6 +539,9 @@ def publish_grc_project_records(
                 ),
             )
             if target_id is None:
+                if target_sequence_dirty:
+                    advance_grc_target_sequence(Project)
+                    target_sequence_dirty = False
                 project = Project.objects.create(**defaults)
                 created = True
             else:
@@ -544,6 +549,7 @@ def publish_grc_project_records(
                     pk=target_id,
                     defaults=defaults,
                 )
+                target_sequence_dirty = target_sequence_dirty or created
             created_count += int(created)
             project.project_districts.set(
                 district_target_ids[source_id] for source_id in record.district_source_ids

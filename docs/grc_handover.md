@@ -55,7 +55,9 @@ Implemented metadata tables:
 The source identity is now a canonical DWH UUID. `GRCSourceRecord` maps it to
 the existing GO integer primary key, preserving every upstream API/frontend
 route. A database constraint prevents two UUIDs in the same source/entity
-stream from claiming one GO target.
+stream from claiming one GO target. Before allocating a GRC-only integer ID,
+the publisher advances the PostgreSQL sequence past explicit GO IDs, existing
+rows, and retained tombstone mappings without rewinding it.
 
 Implemented projection/validation components:
 

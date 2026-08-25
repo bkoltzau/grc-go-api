@@ -400,7 +400,8 @@ The existing Country Profile consumes World Bank, HDR, ACAPS, climate, FDRS, Nat
 
 Status: approved for version 1.
 
-Every two hours, readers take a repeatable-read complete snapshot. The publisher
+The scheduled design invokes readers every two hours to take a repeatable-read
+complete snapshot. The publisher
 computes deterministic content hashes over fields and ordered relationship UUIDs
 and compares them with the last successfully published metadata. Facts retain
 `ingestedat` and `isdeleted` for audit, watermark, and tombstone handling, but a

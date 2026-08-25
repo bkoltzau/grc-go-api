@@ -12,6 +12,7 @@ from django.utils import timezone
 
 from api.models import Country, District
 from grc_read_model.grc_identity import (
+    advance_grc_target_sequence,
     GRCIdentityError,
     grc_source_content_matches,
     parse_grc_source_id,
@@ -224,6 +225,7 @@ def publish_grc_district_snapshot(
 
     with transaction.atomic():
         published_at = timezone.now()
+        target_sequence_dirty = True
 
         for record in records:
             target_id = _resolve_target_id(
@@ -246,6 +248,9 @@ def publish_grc_district_snapshot(
             )
             defaults = record.district_defaults(country_target_ids[record.country_source_id])
             if target_id is None:
+                if target_sequence_dirty:
+                    advance_grc_target_sequence(District)
+                    target_sequence_dirty = False
                 district = District.objects.create(**defaults)
                 created = True
             else:
@@ -253,6 +258,7 @@ def publish_grc_district_snapshot(
                     pk=target_id,
                     defaults=defaults,
                 )
+                target_sequence_dirty = target_sequence_dirty or created
             created_count += int(created)
             deprecated_count += int(district.is_deprecated)
 

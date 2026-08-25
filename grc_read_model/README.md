@@ -40,6 +40,8 @@ It deliberately preserves upstream Country fields that Gold version 1 does not
 own. It uses `grc_source_id` as the stable Gold identity. An optional
 `gocountryid` preserves the original target for a GO-sourced row; a GRC-only row
 receives a normal GO integer ID and retains it through `GRCSourceRecord`.
+Before allocating such an ID, the adapter advances but never rewinds the
+PostgreSQL sequence past explicit GO IDs and retained GRC mappings.
 It uses `goregionid` for the existing Region primary key,
 maps inactive Gold rows to GO's `is_deprecated`, distinguishes that from a Gold
 soft delete, resolves sovereign-country links in a second pass, and rejects
@@ -47,11 +49,12 @@ unknown GO enum values, duplicate identifiers, invalid geometry, conflicting
 Region values, and unresolved sovereign keys.
 
 The publisher receives a complete snapshot and computes deterministic content
-hashes every two hours. It does not connect to Gold or schedule itself. It
-rejects timezone-naive source timestamps; existing naive DWH values are
+hashes on every invocation; the deployment target is one invocation every two
+hours. It does not connect to Gold or schedule itself. It rejects timezone-naive
+source timestamps; existing naive DWH values are
 explicitly interpreted as Berlin local time and exposed as `timestamptz`.
 
-The function returns per-batch counters; the future orchestration layer owns
+The function returns per-batch counters; the reference orchestration layer owns
 aggregating them into `GRCSyncRun` and advancing `GRCReadModelState` only after
 all dependency-safe publishers succeed.
 

@@ -12,6 +12,7 @@ from django.utils import timezone
 
 from api.models import Country, CountryType, Region, RegionName
 from grc_read_model.grc_identity import (
+    advance_grc_target_sequence,
     GRCIdentityError,
     grc_source_content_matches,
     parse_grc_source_id,
@@ -323,6 +324,7 @@ def publish_grc_country_snapshot(
             )
 
         countries_by_source_id: dict[UUID, Country] = {}
+        target_sequence_dirty = True
         for record in records:
             target_id = _resolve_target_id(
                 source_system=source_system,
@@ -343,6 +345,9 @@ def publish_grc_country_snapshot(
                 )
             )
             if target_id is None:
+                if target_sequence_dirty:
+                    advance_grc_target_sequence(Country)
+                    target_sequence_dirty = False
                 country = Country.objects.create(**record.country_defaults())
                 created = True
             else:
@@ -350,6 +355,7 @@ def publish_grc_country_snapshot(
                     pk=target_id,
                     defaults=record.country_defaults(),
                 )
+                target_sequence_dirty = target_sequence_dirty or created
             countries_by_source_id[record.source_id] = country
             created_count += int(created)
             deprecated_count += int(country.is_deprecated)
